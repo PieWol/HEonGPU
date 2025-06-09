@@ -197,7 +197,7 @@ $ cmake -S . -D HEonGPU_BUILD_EXAMPLES=ON -D CMAKE_CUDA_ARCHITECTURES=89 -B buil
 $ cmake --build ./build/
 
 $ ./build/bin/examples/<...>
-$ Example: ./build/bin/examples/1_basic_bfv
+$ Example: ./build/bin/examples/basic/1_basic_bfv
 ```
 
 ### Toy Example
