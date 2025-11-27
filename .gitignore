@@ -27,3 +27,18 @@ CTestTestfile.cmake
 *.vcxproj
 *.vcxproj.filters
 *.DS_Store
+
+# CPM (CMake Package Manager) files
+CPM_modules/
+_deps/
+cpm-package-lock.cmake
+cmake/CPM_*.cmake
+
+# CMake generated files
+CPackConfig.cmake
+CPackSourceConfig.cmake
+generated/
+*.pc
+
+# Downloaded CMake modules
+rapids-cmake/

@@ -4,6 +4,7 @@
 # Developer: Alişah Özcan
 
 cmake_minimum_required(VERSION 3.26.4 FATAL_ERROR)
+set(CMAKE_CUDA_ARCHITECTURES 86)
 project(HEonGPU VERSION 1.1 LANGUAGES C CXX CUDA ASM)
 
 if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "")
@@ -35,7 +36,7 @@ find_package(ZLIB REQUIRED)
 find_package(OpenSSL REQUIRED)
 
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 75)
+    set(CMAKE_CUDA_ARCHITECTURES 86)
 endif()
 message(STATUS "Setting CMAKE_CUDA_ARCHITECTURES to ${CMAKE_CUDA_ARCHITECTURES} for HEonGPU")
 
@@ -96,7 +97,7 @@ endif()
 # Examples #
 ############
 
-option(HEonGPU_BUILD_EXAMPLES "Build HEonGPU Examples" OFF)
+option(HEonGPU_BUILD_EXAMPLES "Build HEonGPU Examples" ON)
 message(STATUS "HEonGPU_BUILD_EXAMPLES: ${HEonGPU_BUILD_EXAMPLES}")
 if(HEonGPU_BUILD_EXAMPLES)
     add_subdirectory(example)
