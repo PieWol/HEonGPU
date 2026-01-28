@@ -19,6 +19,7 @@ set(EXECUTABLES
     11_ckks_serialization 11_ckks_serialization.cu
     12_basic_tfhe 12_basic_tfhe.cu
     13_ckks_rotation 13_ckks_rotation.cu
+    13_ckks_rotation_parallel 13_ckks_rotation_parallel.cu
 )
 
 function(add_example exe source)

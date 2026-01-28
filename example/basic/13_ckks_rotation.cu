@@ -8,9 +8,69 @@
 // Set up HE Scheme
 constexpr auto Scheme = heongpu::Scheme::CKKS;
 
+/**
+ * @brief GPU-aware timer using CUDA Events for accurate GPU timing
+ */
+class GPUTimer {
+    cudaEvent_t start, stop;
+public:
+    GPUTimer() {
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+    }
+
+    ~GPUTimer() {
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+    }
+
+    void startTimer() {
+        cudaEventRecord(start);
+    }
+
+    float stopTimer() {
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+        float milliseconds = 0;
+        cudaEventElapsedTime(&milliseconds, start, stop);
+        return milliseconds;
+    }
+};
 
 // The core idea of our design is to manipulate the encrypted vector in suc4h a way that only a single evaluation of the comparison function is needed to compare all values
 // vector v = (v1,v2,v3), we produce vR = (v1,v2,v3,v1,v2,v3,v1,v2,v3), vC = (v1,v1,v1,v2,v2,v2,v3,v3,v3).
+
+/**
+ * @brief Replicates a row vector homomorphically using rotations
+ *
+ * Takes a ciphertext containing a vector in the first vec_len slots and replicates
+ * it vec_len times using homomorphic rotations and additions.
+ *
+ * @param row_initial Encrypted vector to replicate (first vec_len slots contain data)
+ * @param vec_len Length of the vector to replicate
+ * @param galois_key Galois key for rotation by -vec_len
+ * @param evaluator Arithmetic operator for homomorphic operations
+ * @return Ciphertext containing the replicated row pattern
+ */
+heongpu::Ciphertext<Scheme> replicateRow(
+    const heongpu::Ciphertext<Scheme>& row_initial,
+    int vec_len,
+    heongpu::Galoiskey<Scheme>& galois_key,
+    heongpu::HEArithmeticOperator<Scheme>& evaluator)
+{
+    heongpu::Ciphertext<Scheme> row_replicated = row_initial;  // Start with original
+    heongpu::Ciphertext<Scheme> temp_rotated = row_initial;    // Temporary for rotations
+
+    std::cout << "Applying rotations: ";
+    for (int i = 1; i < vec_len; i++) {
+        std::cout << (i * vec_len) << " ";
+        evaluator.rotate_rows_inplace(temp_rotated, galois_key, -vec_len);
+        evaluator.add_inplace(row_replicated, temp_rotated);
+    }
+    std::cout << "\n";
+
+    return row_replicated;
+}
 
 int main()
 {
@@ -38,9 +98,12 @@ int main()
     heongpu::HEDecryptor<Scheme> decryptor(context, secret_key);
     heongpu::HEArithmeticOperator<Scheme> evaluator(context, encoder);
 
-    // Vektor befüllen. Aktuell fixed length
-    std::vector<double> input = { 1, 2, 3, 4};
-    int vec_len = input.size();
+    // Vektor befüllen mit 64 Elementen
+    const int vec_len = 64;
+    std::vector<double> input(vec_len);
+    for(int i = 0; i < vec_len; i++) {
+        input[i] = i + 1;  // [1, 2, 3, ..., 64]
+    }
 
 
     // Calculate total slots needed for the matrix
@@ -89,22 +152,12 @@ int main()
     heongpu::Ciphertext<Scheme> row_ciphertext(context);
     encryptor.encrypt(row_ciphertext, row_plaintext);
 
-    // Replicate row using rotations and additions
-    // Result = original + rotate(vec_len) + rotate(2*vec_len) + ... + rotate((vec_len-1)*vec_len)
-    heongpu::Ciphertext<Scheme> row_replicated(context);
-    encryptor.encrypt(row_replicated, row_plaintext);  // Start with a fresh copy of the original
-
-    std::cout << "Applying rotations: ";
-    heongpu::Ciphertext<Scheme> temp_rotated(context);
-    encryptor.encrypt(temp_rotated, row_plaintext);  // Start with a copy to rotate
-
-    for (int i = 1; i < vec_len; i++) {
-        std::cout << (i * vec_len) << " ";
-
-        evaluator.rotate_rows_inplace(temp_rotated, galois_key, -vec_len);  // Negative rotation!
-        evaluator.add_inplace(row_replicated, temp_rotated);
-    }
-    std::cout << "\n";
+    // Benchmark the row replication
+    GPUTimer timer;
+    timer.startTimer();
+    heongpu::Ciphertext<Scheme> row_replicated = replicateRow(row_ciphertext, vec_len, galois_key, evaluator);
+    float time_ms = timer.stopTimer();
+    std::cout << "Row replication took: " << time_ms << " ms\n";
 
     // Decrypt and verify the row replication
     heongpu::Plaintext<Scheme> decrypted_ciphertext(context);
@@ -115,14 +168,7 @@ int main()
     std::cout << "Replicated row vector:\n";
     display_vector(row_result, vec_len * vec_len);
 
-    std::cout << "\nExpected pattern (VR): each element repeated across all rows\n";
-    std::cout << "Row 0: [" << input[0] << ", " << input[1] << ", " << input[2] << ", " << input[3] << "]\n";
-    std::cout << "Row 1: [" << input[0] << ", " << input[1] << ", " << input[2] << ", " << input[3] << "]\n";
-    std::cout << "Row 2: [" << input[0] << ", " << input[1] << ", " << input[2] << ", " << input[3] << "]\n";
-    std::cout << "Row 3: [" << input[0] << ", " << input[1] << ", " << input[2] << ", " << input[3] << "]\n";
 
-
-    // Todo: compare values
 
     return EXIT_SUCCESS;
 }
