@@ -164,12 +164,12 @@ int main()
     heongpu::Ciphertext<Scheme> ciphertext(context);
     encryptor.encrypt(ciphertext, plaintext);
 
-    // Benchmark the parallel row replication
+    // Benchmark the row replication
     GPUTimer timer;
     timer.startTimer();
     heongpu::Ciphertext<Scheme> row_replicated = replicateRow(ciphertext, vec_len, row_galois_key, evaluator);
     float time_ms = timer.stopTimer();
-    std::cout << "Parallel row replication took: " << time_ms << " ms\n";
+    std::cout << "row replication took: " << time_ms << " ms\n";
 
     // Decrypt and verify the row replication
     heongpu::Plaintext<Scheme> decrypted_ciphertext(context);
@@ -221,10 +221,6 @@ int main()
         std::cout << "  Element " << (i+1) << " at position " << (i * vec_len) << ": "
                   << transposed_result[i * vec_len] << "\n";
     }
-
-    // Show full pattern for first few rows
-    std::cout << "\nFull pattern (first " << std::min(128, vec_len * 4) << " slots):\n";
-    display_vector(transposed_result, std::min(128, vec_len * 4));
 
     return EXIT_SUCCESS;
 }
@@ -307,12 +303,12 @@ heongpu::Ciphertext<Scheme> replicateColumn(
 
     // Sum all rotated vectors
     std::cout << "Summing all rotated vectors...\n";
-    heongpu::Ciphertext<Scheme> row_replicated = vector_ciphertexts[0];
+    heongpu::Ciphertext<Scheme> col_replicated = vector_ciphertexts[0];
     for (int i = 1; i < vec_len; i++) {
-        evaluator.add_inplace(row_replicated, vector_ciphertexts[i]);
+        evaluator.add_inplace(col_replicated, vector_ciphertexts[i]);
     }
 
-    return row_replicated;
+    return col_replicated;
 }
 
 /**
