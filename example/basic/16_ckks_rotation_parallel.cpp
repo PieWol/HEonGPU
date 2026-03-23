@@ -89,21 +89,23 @@ heongpu::Ciphertext<Scheme> transposeRowToColumn(
  * Depth consumed: ceil(log2(D)) levels ≈ 11 for D=2048.
  *
  * For the paper's regime (N=64 elements, min pairwise diff ≈ 1/63):
- *   - D=2048 ensures correct sign classification for |x| ≥ 0.016
+ *   - D=2047 ensures correct sign classification for |x| ≥ 0.016
+ *   - D must be 2^k - 1 for BSGS precomputation to cover all required powers
  *   - Scale: input differences in [-1,1] require no extra normalization
  *
  * @param ct_diff  Encrypted difference ct_col - ct_row, at some depth d
  * @param poly_eval CKKSPolyEvaluator (exposes evaluate_poly)
  * @param relin_key Relinearization key
  * @param scale     Encoding scale (must match current ciphertext scale)
- * @param degree    Chebyshev degree; 2048 matches the paper for N≤256
+ * @param degree    Chebyshev degree; must be 2^k - 1 for BSGS to work
+ *                  correctly. 2047 (= 2^11 - 1) matches the paper for N≤256.
  * @return Ciphertext containing sign approximation values ≈ ±1
  */
 heongpu::Ciphertext<Scheme>
 chebyshev_sign_approx(heongpu::Ciphertext<Scheme>& ct_diff,
                       CKKSPolyEvaluator& poly_eval,
                       heongpu::Relinkey<Scheme>& relin_key, double scale,
-                      int degree = 2048);
+                      int degree = 2047);
 
 /**
  * @brief Sum rows of a matrix ciphertext
@@ -160,9 +162,9 @@ std::vector<double> normalizeForRanking(const std::vector<double>& input)
  *   depth 0  → fresh ciphertext
  *   depth 1  → transposeRowToColumn (multiply_plain mask + rescale)
  *   depth 1  → mod_drop ct_row for alignment
- *   depth 13 → chebyshev_sign_approx degree-2048 (12 levels via BSGS)
- *   depth 13 → add_plain +1, sumRows (rotations+adds, no level change)
- *   Total: 13 ≤ 14 ✓
+ *   depth 12 → chebyshev_sign_approx degree-2047 (11 levels via BSGS)
+ *   depth 12 → add_plain +1, sumRows (rotations+adds, no level change)
+ *   Total: 12 ≤ 14 ✓
  */
 heongpu::Ciphertext<Scheme>
 basicRank(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
@@ -246,7 +248,7 @@ int main()
     // vec_len=64: uses 64×64=4,096 of 16,384 available slots.
     // Paper's single-ciphertext limit is N=128 (128²=16,384 exactly fills
     // the slot space). Upgrade to 128 by changing this single line.
-    // min pairwise diff = 1/(vec_len-1) = 1/63 ≈ 0.016; degree-2048
+    // min pairwise diff = 1/(vec_len-1) = 1/63 ≈ 0.016; degree-2047
     // Chebyshev correctly classifies sign for |x| ≥ 0.016. ✓
     const int vec_len = 64;
 
@@ -652,13 +654,13 @@ basicRank(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
     heongpu::Ciphertext<Scheme> ct_diff(context);
     evaluator.sub(ct_col, ct_row, ct_diff); // v[k] - v[j]: positive if v[k] > v[j]
 
-    // Step 4: sign approximation using degree-2048 Chebyshev BSGS
+    // Step 4: sign approximation using degree-2047 Chebyshev BSGS
     // ct_diff ∈ [-1,1] is guaranteed by the caller's normalizeForRanking()
     // precondition (input in [0,1] → diffs bounded to [-1,1]).
     // Depth consumed: 12 levels → total depth ≈ 13
-    std::cout << "Step 4: Applying Chebyshev sign approximation (degree 2048)...\n";
+    std::cout << "Step 4: Applying Chebyshev sign approximation (degree 2047)...\n";
     heongpu::Ciphertext<Scheme> ct_sign = chebyshev_sign_approx(
-        ct_diff, evaluator, relin_key, scale, /*degree=*/2048);
+        ct_diff, evaluator, relin_key, scale, /*degree=*/2047);
 
     // Step 5: shift sign range [-1,1] to [0,2] by adding 1 (no level consumed)
     // Skip ÷2: at depth≈13, a multiply_plain would exhaust the last prime.
