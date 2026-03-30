@@ -401,22 +401,23 @@ int main()
     std::cout << "\nRanking results:\n";
     std::cout << "Input vector:  ";
     display_vector(input, vec_len);
-    // Raw value at k*vec_len ≈ 2*rank[k] + 1  →  rank[k] ≈ (raw - 1) / 2
-    std::cout << "Rank (count of smaller elements, decoded from raw HE output):\n";
+    // Raw value at k*vec_len = 2*count_smaller + count_equal
+    // Fractional rank (1-based) = (raw + 1) / 2
+    std::cout << "Rank (1-based fractional, decoded from raw HE output):\n";
     for (int i = 0; i < vec_len; i++)
     {
-        double decoded_rank = (rank_result[i * vec_len] - 1.0) / 2.0;
+        double decoded_rank = (rank_result[i * vec_len] + 1.0) / 2.0;
         std::cout << "  input[" << i << "] = " << input[i]
                   << " -> rank = " << decoded_rank << "\n";
     }
 
-    // Verification: for sorted input input[i] = i/(vec_len-1), rank = i
-    std::cout << "\nVerification (expected rank = index):\n";
+    // Verification: for sorted input input[i] = i, rank = i+1 (1-based)
+    std::cout << "\nVerification (expected rank = index + 1):\n";
     bool all_correct = true;
     for (int i = 0; i < vec_len; i++)
     {
-        double expected_rank = static_cast<double>(i);
-        double actual_rank   = (rank_result[i * vec_len] - 1.0) / 2.0;
+        double expected_rank = static_cast<double>(i + 1);
+        double actual_rank   = (rank_result[i * vec_len] + 1.0) / 2.0;
         double error         = std::abs(actual_rank - expected_rank);
         bool is_correct      = (error < 0.5);
         std::cout << "  Element " << (i + 1) << ": expected=" << expected_rank
