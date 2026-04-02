@@ -23,7 +23,6 @@ Usage:
 import subprocess
 import csv
 import sys
-import time
 import argparse
 import statistics
 from pathlib import Path
@@ -75,18 +74,16 @@ def benchmark_n(binary: Path, n: int, runs: int) -> dict | None:
     run_results = []
     for run_idx in range(runs):
         print(f"  run {run_idx + 1}/{runs} ...", end=" ", flush=True)
-        t_start = time.time()
         data = run_once(binary, n)
-        total_s = time.time() - t_start
 
         if data is None:
             print("FAILED")
             continue
 
-        data["total_s"] = total_s
+        total_s = (data.get('ctx_ms', 0) + data.get('keygen_ms', 0) + data.get('rank_ms', 0)) / 1000
         print(f"ctx_ms={data.get('ctx_ms', 0):.1f}  "
               f"rank_ms={data.get('rank_ms', 0):.1f}  "
-              f"total={total_s:.1f}s")
+              f"total={total_s:.2f}s")
         run_results.append(data)
 
     if not run_results:
@@ -102,6 +99,7 @@ def benchmark_n(binary: Path, n: int, runs: int) -> dict | None:
 
     avg["rank_s"] = avg["rank_ms"] / 1000.0
     avg["keygen_s"] = avg["keygen_ms"] / 1000.0
+    avg["total_s"] = (avg["ctx_ms"] + avg["keygen_ms"] + avg["rank_ms"]) / 1000.0
     return avg
 
 
