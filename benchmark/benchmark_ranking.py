@@ -84,7 +84,8 @@ def benchmark_n(binary: Path, n: int, runs: int) -> dict | None:
             continue
 
         data["total_s"] = total_s
-        print(f"rank_ms={data.get('rank_ms', 0):.1f}  "
+        print(f"ctx_ms={data.get('ctx_ms', 0):.1f}  "
+              f"rank_ms={data.get('rank_ms', 0):.1f}  "
               f"total={total_s:.1f}s")
         run_results.append(data)
 
@@ -105,15 +106,16 @@ def benchmark_n(binary: Path, n: int, runs: int) -> dict | None:
 
 
 def print_table(results: list[dict]) -> None:
-    print("\n" + "=" * 72)
-    print(f"{'N':>6}  {'keygen_ms':>12}  {'rank_ms':>12}  {'rank_s':>10}  {'total_s':>10}")
-    print("-" * 72)
+    print("\n" + "=" * 86)
+    print(f"{'N':>6}  {'ctx_ms':>10}  {'keygen_ms':>12}  {'rank_ms':>12}  {'rank_s':>10}  {'total_s':>10}")
+    print("-" * 86)
     for r in results:
+        cx = r.get("ctx_ms", 0)
         ks = r.get("keygen_ms", 0)
         rs = r.get("rank_ms", 0)
         ts = r.get("total_s", 0)
-        print(f"{r['n']:>6}  {ks:>12.1f}  {rs:>12.1f}  {rs/1000:>10.3f}  {ts:>10.1f}")
-    print("=" * 72)
+        print(f"{r['n']:>6}  {cx:>10.1f}  {ks:>12.1f}  {rs:>12.1f}  {rs/1000:>10.3f}  {ts:>10.1f}")
+    print("=" * 86)
 
 
 def save_csv(results: list[dict], path: Path) -> None:

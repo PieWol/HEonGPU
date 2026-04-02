@@ -289,7 +289,10 @@ int main(int argc, char* argv[])
     context->set_coeff_modulus_bit_sizes(
         {60, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40}, {60});
     double scale = pow(2.0, 40); // matches 40-bit computation primes
+    GPUTimer ctx_timer;
+    ctx_timer.startTimer();
     context->generate();
+    float ctx_ms = ctx_timer.stopTimer();
 
     // Validate N^2 fits in available slots
     int available_slots = static_cast<int>(poly_modulus_degree / 2);
@@ -433,7 +436,8 @@ int main(int argc, char* argv[])
         // Single line parseable by benchmark_ranking.py
         // rank_ms excludes key generation; keygen_ms reported separately
         std::cout << "BENCH:"
-                  << " N=" << vec_len << " keygen_ms=" << keygen_ms
+                  << " N=" << vec_len << " ctx_ms=" << ctx_ms
+                  << " keygen_ms=" << keygen_ms
                   << " rank_ms=" << rank_ms << "\n";
     }
     else
