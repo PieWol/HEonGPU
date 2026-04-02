@@ -4,6 +4,8 @@ CMakeCache.txt
 cmake_install.cmake
 Makefile
 CTestTestfile.cmake
+benchmark/benchmark_run.log
+benchmark/*.csv
 
 # Output directories
 /bin/
