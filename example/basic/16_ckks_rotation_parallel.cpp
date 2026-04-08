@@ -288,7 +288,7 @@ int main(int argc, char* argv[])
     // exhausting Q)
     context->set_coeff_modulus_bit_sizes(
         {60, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40}, {60});
-    double scale = pow(2.0, 40); // matches 40-bit computation primes
+    double scale = pow(2.0, 40); // matches 40-bit computation primes. Sets the decimial precision -> normalized input is required. no headroom for integral precision.
     GPUTimer ctx_timer;
     ctx_timer.startTimer();
     context->generate();
@@ -666,6 +666,22 @@ sumRows(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
         std::cout << "\n";
     return result;
 }
+/**
+ * @brief Compute k-th rank of an encrypted vector.
+ * 
+ * 
+ */
+heongpu::Ciphertext<Scheme>k_rank(
+        const heongpu::Ciphertext<Scheme>& ct_vector,
+        int vec_len,
+        const int k,
+        CKKSPolyEvaluator& evaluator,
+        heongpu::HEEncoder<Scheme>& encoder,
+        heongpu::HEContext<Scheme>& context, double scale);{
+
+            
+
+        }
 
 /**
  * @brief Algorithm 3 (Rank): compute fractional ranking of an encrypted vector.
