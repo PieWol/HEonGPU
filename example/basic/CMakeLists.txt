@@ -23,6 +23,7 @@ set(EXECUTABLES
     15_basic_tfhe 15_basic_tfhe.cpp
     16_ckks_rotation_parallel 16_ckks_rotation_parallel.cpp
     17_ckks_comparison 17_ckks_comparison.cpp
+    18_ckks_order_statistics 18_ckks_order_statistics.cpp
 )
 
 function(add_example exe source)
