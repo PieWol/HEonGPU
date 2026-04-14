@@ -87,6 +87,7 @@ namespace heongpu
 
         void print_memory_pool_status() const;
         size_t get_current_device_pool_memory_usage() const;
+        size_t get_peak_device_pool_memory_usage() const;
         size_t get_free_device_pool_memory() const;
 
         size_t get_current_host_pool_memory_usage() const;

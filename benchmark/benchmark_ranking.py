@@ -83,7 +83,10 @@ def benchmark_n(binary: Path, n: int, runs: int) -> dict | None:
         total_s = (data.get('ctx_ms', 0) + data.get('keygen_ms', 0) + data.get('rank_ms', 0)) / 1000
         print(f"ctx_ms={data.get('ctx_ms', 0):.1f}  "
               f"rank_ms={data.get('rank_ms', 0):.1f}  "
-              f"total={total_s:.2f}s")
+              f"total={total_s:.2f}s  "
+              f"gpu_keys={data.get('gpu_keys_mib', '?')}MiB  "
+              f"gpu_rank={data.get('gpu_rank_mib', '?')}MiB  "
+              f"gpu_peak={data.get('gpu_peak_mib', '?')}MiB")
         run_results.append(data)
 
     if not run_results:
@@ -104,16 +107,21 @@ def benchmark_n(binary: Path, n: int, runs: int) -> dict | None:
 
 
 def print_table(results: list[dict]) -> None:
-    print("\n" + "=" * 86)
-    print(f"{'N':>6}  {'ctx_ms':>10}  {'keygen_ms':>12}  {'rank_ms':>12}  {'rank_s':>10}  {'total_s':>10}")
-    print("-" * 86)
+    print("\n" + "=" * 125)
+    print(f"{'N':>6}  {'ctx_ms':>10}  {'keygen_ms':>12}  {'rank_ms':>12}  "
+          f"{'rank_s':>10}  {'total_s':>10}  {'keys_MiB':>10}  {'rank_MiB':>10}  {'peak_MiB':>10}")
+    print("-" * 125)
     for r in results:
-        cx = r.get("ctx_ms", 0)
-        ks = r.get("keygen_ms", 0)
-        rs = r.get("rank_ms", 0)
-        ts = r.get("total_s", 0)
-        print(f"{r['n']:>6}  {cx:>10.1f}  {ks:>12.1f}  {rs:>12.1f}  {rs/1000:>10.3f}  {ts:>10.1f}")
-    print("=" * 86)
+        cx  = r.get("ctx_ms", 0)
+        ks  = r.get("keygen_ms", 0)
+        rs  = r.get("rank_ms", 0)
+        ts  = r.get("total_s", 0)
+        gk  = r.get("gpu_keys_mib", float("nan"))
+        gr  = r.get("gpu_rank_mib", float("nan"))
+        gp  = r.get("gpu_peak_mib", float("nan"))
+        print(f"{r['n']:>6}  {cx:>10.1f}  {ks:>12.1f}  {rs:>12.1f}  "
+              f"{rs/1000:>10.3f}  {ts:>10.1f}  {gk:>10.0f}  {gr:>10.0f}  {gp:>10.0f}")
+    print("=" * 125)
 
 
 def save_csv(results: list[dict], path: Path) -> None:

@@ -345,6 +345,17 @@ namespace heongpu
         return device_status.value;
     }
 
+    size_t MemoryPool::get_peak_device_pool_memory_usage() const
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!device_stats_adaptor_)
+        {
+            return 0;
+        }
+        auto device_status = device_stats_adaptor_->get_bytes_counter();
+        return static_cast<size_t>(device_status.peak);
+    }
+
     size_t MemoryPool::get_free_device_pool_memory() const
     {
         std::lock_guard<std::mutex> guard(mutex_);
