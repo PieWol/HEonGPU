@@ -226,6 +226,25 @@ class GPUTimer
     }
 };
 
+/** Returns bytes currently sub-allocated from the RMM device pool, in MiB. */
+static size_t getGPUUsedMiB()
+{
+    return heongpu::MemoryPool::instance().get_current_device_pool_memory_usage()
+           / (1024ULL * 1024ULL);
+}
+
+/**
+ * Returns the lifetime peak of sub-allocations from the RMM device pool, in MiB.
+ * The stats_resource_adaptor tracks the high-water mark of currently live bytes
+ * across all allocate/deallocate calls, so this captures the true maximum VRAM
+ * demand even when temporary buffers have already been freed.
+ */
+static size_t getPeakGPUMiB()
+{
+    return heongpu::MemoryPool::instance().get_peak_device_pool_memory_usage()
+           / (1024ULL * 1024ULL);
+}
+
 /**
  * @brief Compute required transpose Galois shifts for TransR.
  *
@@ -282,12 +301,22 @@ int main(int argc, char* argv[])
     const size_t poly_modulus_degree = 32768;
     context->set_poly_modulus_degree(poly_modulus_degree);
 
-    // Q = 60 + 14×40 = 620 bits; P = 60 bits → Q_tilde = 680 bits
-    // 680 < 881 = heongpu_128bit_std_parms(32768) → 128-bit security ✓
+    // Q = 60 + 14×40 = 620 bits; P = 4×60 = 240 bits → Q_tilde = 860 bits
+    // 860 < 881 = heongpu_128bit_std_parms(32768) → 128-bit security ✓
     // 15 primes in Q → 14 usable computation levels (14 rescales before
     // exhausting Q)
+    //
+    // 4 P primes → KEYSWITCHING_METHOD_II (HYBRID decomposition):
+    //   d = ceil(15/4) = 4 digit groups, each covering ~4 Q primes.
+    //   Key size: 2 × d × |Q∪P| × n  vs  2 × |Q| × |Q∪P| × n  (METHOD_I)
+    //   = 2×4×19×32768  vs  2×15×16×32768  →  ~3× smaller per key.
+    //   Validator constraint per group: sum(Q_group_bits) ≤ sum(P_bits)=240 ✓
+    //     Group 1 (60+40+40+40=180), Groups 2-3 (160), Remainder (120) all ≤ 240.
+    //   4 P primes is the maximum within the 881-bit security budget
+    //   (5×60=300 → 620+300=920 > 881 would violate 128-bit security).
     context->set_coeff_modulus_bit_sizes(
-        {60, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40}, {60});
+        {60, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40},
+        {60, 60, 60, 60});
     double scale = pow(2.0, 40); // matches 40-bit computation primes. Sets the decimial precision -> normalized input is required. no headroom for integral precision.
     GPUTimer ctx_timer;
     ctx_timer.startTimer();
@@ -352,6 +381,13 @@ int main(int argc, char* argv[])
     }
 
     // ===== KEY GENERATION (timed) =====
+    // gpu_baseline_bytes: live sub-allocations after context setup but before
+    // keygen — used as the reference for delta metrics (gpu_keys_mib,
+    // gpu_rank_mib).  These are actual bytes sub-allocated from the pool,
+    // not the pool's reserved capacity.
+    const size_t kMiB = 1024ULL * 1024ULL;
+    size_t gpu_baseline_bytes = heongpu::MemoryPool::instance().get_current_device_pool_memory_usage();
+    size_t gpu_baseline_mib   = gpu_baseline_bytes / kMiB;
     GPUTimer keygen_timer;
     keygen_timer.startTimer();
 
@@ -371,8 +407,10 @@ int main(int argc, char* argv[])
     keygen.generate_relin_key(relin_key, secret_key);
 
     float keygen_ms = keygen_timer.stopTimer();
+    size_t gpu_keys_mib = getGPUUsedMiB() - gpu_baseline_mib;
     if (g_verbose)
-        std::cout << "Key generation: " << keygen_ms << " ms\n";
+        std::cout << "Key generation: " << keygen_ms << " ms  (keys: "
+                  << gpu_keys_mib << " MiB VRAM)\n";
 
     // ===== Input preparation =====
     // bench mode: uniform random (realistic); verbose mode: sorted for easy
@@ -423,6 +461,16 @@ int main(int argc, char* argv[])
                   encoder, context, scale);
 
     float rank_ms = rank_timer.stopTimer();
+    // gpu_rank_mib: net sub-allocations still live above the pre-keygen baseline
+    //   (keys + ranking result ciphertext; freed temporaries are not counted).
+    //   Computed in bytes before dividing to avoid size_t underflow.
+    // gpu_peak_mib: all-time high-water mark of actual sub-allocations since pool
+    //   init — captures the worst-case simultaneous VRAM demand including all
+    //   freed temporaries (intermediate ciphertexts, Chebyshev buffers, etc.).
+    //   This is the number that determines the minimum VRAM required to run.
+    size_t gpu_rank_mib = (heongpu::MemoryPool::instance().get_current_device_pool_memory_usage()
+                           - gpu_baseline_bytes) / kMiB;
+    size_t gpu_peak_mib = getPeakGPUMiB();
 
     // ===== Decrypt and decode =====
     heongpu::Plaintext<Scheme> rank_plaintext(context);
@@ -438,7 +486,10 @@ int main(int argc, char* argv[])
         std::cout << "BENCH:"
                   << " N=" << vec_len << " ctx_ms=" << ctx_ms
                   << " keygen_ms=" << keygen_ms
-                  << " rank_ms=" << rank_ms << "\n";
+                  << " rank_ms=" << rank_ms
+                  << " gpu_keys_mib=" << gpu_keys_mib
+                  << " gpu_rank_mib=" << gpu_rank_mib
+                  << " gpu_peak_mib=" << gpu_peak_mib << "\n";
     }
     else
     {
@@ -478,6 +529,10 @@ int main(int argc, char* argv[])
         std::cout << "  Key generation : " << keygen_ms << " ms\n";
         std::cout << "  Ranking        : " << rank_ms << " ms  ("
                   << (rank_ms / 1000.0) << " s)\n";
+        std::cout << "\nVRAM usage (above context baseline):\n";
+        std::cout << "  Keys           : " << gpu_keys_mib << " MiB\n";
+        std::cout << "  After ranking  : " << gpu_rank_mib << " MiB  (keys + result, freed temporaries excluded)\n";
+        std::cout << "  Peak           : " << gpu_peak_mib << " MiB  (true high-water mark incl. freed temporaries)\n";
     }
 
     return EXIT_SUCCESS;
@@ -671,17 +726,17 @@ sumRows(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
  * 
  * 
  */
-heongpu::Ciphertext<Scheme>k_rank(
-        const heongpu::Ciphertext<Scheme>& ct_vector,
-        int vec_len,
-        const int k,
-        CKKSPolyEvaluator& evaluator,
-        heongpu::HEEncoder<Scheme>& encoder,
-        heongpu::HEContext<Scheme>& context, double scale);{
-
-            
-
-        }
+/*heongpu::Ciphertext<Scheme>k_rank(
+/*        const heongpu::Ciphertext<Scheme>& ct_vector,
+/*        int vec_len,
+/*        const int k,
+/*        CKKSPolyEvaluator& evaluator,
+/*        heongpu::HEEncoder<Scheme>& encoder,
+/*        heongpu::HEContext<Scheme>& context, double scale);{
+/*
+/*            
+/*
+/*        }
 
 /**
  * @brief Algorithm 3 (Rank): compute fractional ranking of an encrypted vector.
