@@ -23,6 +23,7 @@ set(EXECUTABLES
     15_basic_tfhe 15_basic_tfhe.cpp
     16_ckks_ranking 16_ckks_ranking.cpp
     17_ckks_sort 17_ckks_sort.cpp
+    18_ckks_sorting 18_ckks_sorting.cpp
 )
 
 function(add_example exe source)
