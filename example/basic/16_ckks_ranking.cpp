@@ -149,6 +149,30 @@ sumRows(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
  * @param input Raw values (any finite range; all-equal input is undefined)
  * @return Values linearly rescaled to [0,1] via min-max normalization
  */
+/**
+ * @brief Select Chebyshev degree for sign approximation based on vector length.
+ *
+ * Mirrors the reference implementation's compareDepth table (test-ranking.cpp):
+ *   N<=8:   compareDepth=7  → degree=127   (min gap ≈ 1/7  = 0.143)
+ *   N<=16:  compareDepth=8  → degree=255   (min gap ≈ 1/15 = 0.067)
+ *   N<=64:  compareDepth=10 → degree=1023  (min gap ≈ 1/63 = 0.016)
+ *   N<=128: compareDepth=11 → degree=2047  (min gap ≈ 1/127= 0.008)
+ *
+ * degree = 2^compareDepth - 1  (BSGS requires 2^k-1 for full coverage).
+ * Smaller N → larger gaps → lower-degree polynomial suffices → fewer levels
+ * consumed → faster BSGS evaluation (cost ∝ sqrt(degree)).
+ *
+ * This is a heuristic assuming worst-case equally-spaced inputs. Inputs with
+ * smaller gaps than 1/(N-1) may not be correctly classified.
+ */
+int selectChebyshevDegree(int N)
+{
+    if (N <= 8)  return 127;
+    if (N <= 16) return 255;
+    if (N <= 64) return 1023;
+    return 2047;
+}
+
 std::vector<double> normalizeForRanking(const std::vector<double>& input)
 {
     double lo    = *std::min_element(input.begin(), input.end());
@@ -174,11 +198,17 @@ std::vector<double> normalizeForRanking(const std::vector<double>& input)
  *   depth 0  → fresh ciphertext
  *   depth 1  → transposeRowToColumn (multiply_plain mask + rescale)
  *   depth 1  → mod_drop ct_row for alignment
- *   depth 12 → chebyshev_sign_approx degree-2047 (11 levels via BSGS)
- *   depth 12 → add_plain +1, SumR (row-folding rotations+adds, no level change)
- *   depth 13 → multiply_plain(half_first_row_mask) + rescale (MaskR + ÷2)
- *   depth 13 → add_plain +0.5 (complete fractional rank, no level change)
- *   Total: 13 ≤ 14 ✓
+ *   depth 1+D → chebyshev_sign_approx degree-(2^D-1), D levels via BSGS
+ *   depth 1+D → add_plain +1, SumR (no level change)
+ *   depth 2+D → multiply_plain 0.5 + rescale
+ *   depth 2+D → add_plain +0.5 (no level change)
+ *   Total: D+3 levels consumed.
+ *
+ *   N-adaptive D (selectChebyshevDegree):
+ *     N≤8:   D=7  → degree=127  → 10 levels ≤ 14 ✓
+ *     N≤16:  D=8  → degree=255  → 11 levels ≤ 14 ✓
+ *     N≤64:  D=10 → degree=1023 → 13 levels ≤ 14 ✓
+ *     N≤128: D=11 → degree=2047 → 14 levels = 14 ✓
  *
  * Output: position j in the decrypted result holds rank[j] directly (1-based
  * fractional); positions j >= vec_len are garbage and should be ignored.
@@ -796,11 +826,13 @@ basicRank(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
     heongpu::Ciphertext<Scheme> ct_diff(context);
     evaluator.sub(ct_row, ct_col, ct_diff);
 
-    // Step 4: Chebyshev sign approximation (degree 2047 = 2^11 - 1)
+    // Step 4: Chebyshev sign approximation — degree selected adaptively for N
+    const int cheby_degree = selectChebyshevDegree(vec_len);
     if (g_verbose)
-        std::cout << "Step 4: Chebyshev sign approx...\n";
+        std::cout << "Step 4: Chebyshev sign approx (N=" << vec_len
+                  << " → degree=" << cheby_degree << ")...\n";
     heongpu::Ciphertext<Scheme> ct_sign = chebyshev_sign_approx(
-        ct_diff, evaluator, relin_key, scale, /*degree=*/2047);
+        ct_diff, evaluator, relin_key, scale, cheby_degree);
 
     // Step 5: {-1,0,+1} → {0,1,2}: add 1 (no level consumed)
     if (g_verbose)
