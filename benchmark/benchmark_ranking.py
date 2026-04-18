@@ -29,7 +29,7 @@ from pathlib import Path
 
 # Default binary location relative to this script
 _SCRIPT_DIR = Path(__file__).resolve().parent
-BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/basic/16_ckks_rotation_parallel"
+BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/basic/16_ckks_ranking"
 
 # Paper's single-ciphertext N values (N^2 <= 16384 slots with poly_deg=32768)
 N_VALUES_DEFAULT = [8, 16, 32, 64, 128]
