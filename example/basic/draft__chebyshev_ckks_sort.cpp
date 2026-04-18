@@ -1,41 +1,70 @@
-// Copyright 2024-2026 Alişah Özcan
-// Licensed under the Apache License, Version 2.0, see LICENSE for details.
-// SPDX-License-Identifier: Apache-2.0
 
 /**
- * @file 18_ckks_sort.cpp
+ * @file 17_ckks_sort.cpp
  *
- * Implements Algorithm 5 (Sorting) from:
+ * Implements sorting via Algorithm 5 from:
  *   "Efficient Ranking, Order Statistics, and Sorting under CKKS"
  *   Mazzone, Everts, Hahn, Peter — USENIX Security 2025
  *
- * Algorithm 5 (Sorting):
- *   1. R  ← Rank(V)
- *   2. RR ← ReplR(R)
- *   3. M  ← Ind0(RR − (1^N ∥ 2^N ∥ … ∥ N^N))  [one-hot mask per row]
- *   4. VR ← ReplR(V)
- *   5. S  ← TransC(SumC(M · VR))
+ * The algorithm has three phases:
+ *
+ *   Phase 1 — Rank matrix (Algorithm 3):
+ *     VR = ReplR(V)          // N×N: row k = V for all k
+ *     VC = ReplC(TransR(V))  // N×N: col j = V[j] for all rows
+ *     C  = compare(VR,VC)    // C[k,j] ≈ 1 if v[j]>v[k], ≈0 if v[j]<v[k], ≈0.5 if equal
+ *     R  = SumR(C)           // R[k,j] = rank_0(v[j]) + 0.5  in EVERY row k
+ *                            // (SumR cyclic tree-fold fills all N rows identically)
+ *
+ *   Phase 2 — Order statistics (Algorithm 5, steps 2-4):
+ *     subMask[k,j] = -(k + 0.5)   for k=0..N-1, j=0..N-1
+ *     M = Ind0(R + subMask)        // M[k,j] ≈ 1 iff rank_0(v[j]) = k  (one-hot)
+ *     → row k of M selects the (k+1)-th smallest element
+ *
+ *   Phase 3 — Reconstruct sorted values:
+ *     VR = ReplR(V)                // fresh copy, mod-dropped to level of M
+ *     S  = SumC(M · VR)            // S[k, col0] = (k+1)-th order statistic
+ *
+ * Key invariant: SumR distributes the column sum to ALL N rows (cyclic tree-fold
+ * with shifts +N,+2N,+4N,... wraps, so every row ends with the same total).
+ * Therefore no MaskR or ReplR of the rank ciphertext is needed — the rank matrix
+ * from Phase 1 can be fed directly into the subMask subtraction of Phase 2.
  *
  * HEonGPU constraint: multiply_plain(Ciphertext, Plaintext) checks depth equality
- * but freshly-encoded Plaintexts always have depth=0. Operations at depth > 0 that
- * require per-slot plaintext constants (rank constants subtraction, MaskC, MaskR)
- * therefore encrypt those constants as ciphertexts and use mod_drop alignment.
+ * but freshly-encoded Plaintexts always have depth=0.  Per-slot plaintext constants
+ * (subMask, TransR MaskC) are therefore encrypted as ciphertexts and mod-dropped
+ * to the required level before use.
  *
- * Output layout (column format):
- *   The final ciphertext is NOT transposed (TransC is omitted). Instead the sorted
- *   values reside at positions 0, N, 2N, …, (N−1)·N of the decoded slot vector:
- *     slot k·N  =  (k+1)-th order statistic  (k = 0 .. N-1)
- *   The client reads every N-th slot to recover the sorted vector.
+ * Indicator: the composite-sign approach is used:
+ *   Ind0(x) ≈ 0.5 * (sign(x + 0.5) − sign(x − 0.5))
+ * After normalizing x by 1/N both sign calls live on [-1,1], avoiding the
+ * Gibbs/Runge overflow that would occur with a direct polynomial approximation
+ * of the indicator on [-N,N].  The function returns 2·Ind0 (factor of 2 because
+ * sign(+ε)−sign(−ε) = 1−(−1) = 2); callers divide decoded output by 2.
  *
- * Context: n = 65536 → 32768 slots; 28 computation levels (29 Q primes).
- * Supports N ≤ 128 (single-ciphertext mode, N² ≤ 16384 slots).
- * Accuracy: degree-2047 sign + degree-1023 indicator. Reliable for N ≤ 32;
- * larger N may show indicator approximation errors for elements with close ranks.
+ * Output layout (column format, TransC omitted):
+ *   Slot k·N  =  (k+1)-th order statistic   (k = 0 .. N-1)
+ *   Client reads every N-th slot to recover the sorted vector.
+ *
+ * Depth budget (28 levels available with n=65536, 31 Q-computation primes):
+ *   depth  0  → fresh ciphertext
+ *   depth  1  → Phase 1: TransR MaskC (multiply_plain + rescale)
+ *   depth  1  → mod_drop VR to match VC
+ *   depth 10  → sign degree-255, 9 levels (BSGS)
+ *   depth 10  → add_plain +1, SumR (both free)
+ *   depth 11  → multiply_plain 0.5 + rescale  → R[j] = rank_0(j)+0.5
+ *   depth 11  → Phase 2: encrypt subMask, mod_drop, add (free)
+ *   depth 12  → normalize by 1/N + rescale (indicator pre-step)
+ *   depth 21  → sign degree-255 ×2 (parallel, costs 9 levels)
+ *   depth 21  → subtract signs (free)
+ *   depth 21  → Phase 3: mod_drop fresh VR to level 21 (free)
+ *   depth 22  → multiply(M, VR) + relin + rescale
+ *   depth 22  → SumC (free)
+ *   Total: 22 levels ≤ 28 ✓  (6 levels spare)
  *
  * Usage:
- *   18_ckks_sort [N] [--bench]
+ *   17_ckks_sort [N] [--bench]
  *   N       : vector length, power of 2, default 8
- *   --bench : machine-readable output only
+ *   --bench : machine-readable timing output only
  */
 
 #include <heongpu/heongpu.hpp>
@@ -47,6 +76,7 @@
 #include <cmath>
 #include <random>
 #include <omp.h>
+#include <iomanip>
 
 static bool g_verbose = true;
 constexpr auto Scheme = heongpu::Scheme::CKKS;
@@ -122,10 +152,6 @@ static size_t getPeakGPUMiB()
 // ---------------------------------------------------------------------------
 // Normalization
 // ---------------------------------------------------------------------------
-/**
- * @brief Normalize input to [0,1] so pairwise differences lie in [-1,1].
- * Required before encrypt; the sign approximation domain is [-1,1].
- */
 std::vector<double> normalizeForRanking(const std::vector<double>& input)
 {
     double lo    = *std::min_element(input.begin(), input.end());
@@ -140,7 +166,7 @@ std::vector<double> normalizeForRanking(const std::vector<double>& input)
 // ---------------------------------------------------------------------------
 // Galois shift helpers
 // ---------------------------------------------------------------------------
-/** TransR shifts: -(N*(N-1)/2^i) for i=1..logN  (negative = right-rotation in paper) */
+/** TransR shifts: -(N*(N-1)/2^i) for i=1..logN */
 std::vector<int> transposeGaloisShifts(int vec_len)
 {
     int log_n = static_cast<int>(std::ceil(std::log2(vec_len)));
@@ -150,7 +176,7 @@ std::vector<int> transposeGaloisShifts(int vec_len)
     return shifts;
 }
 
-/** SumC shifts: +1, +2, +4, …, +N/2  (positive = left-rotation in paper ≪) */
+/** SumC shifts: +1, +2, +4, …, +N/2 */
 std::vector<int> sumcGaloisShifts(int vec_len)
 {
     int log_n = static_cast<int>(std::ceil(std::log2(vec_len)));
@@ -165,7 +191,10 @@ std::vector<int> sumcGaloisShifts(int vec_len)
 // ---------------------------------------------------------------------------
 /**
  * @brief ReplR (Algorithm 11): replicate row 0 across all N rows.
- * Shifts: -(N/2)*N, -(N/4)*N, …, -N  (right-rotations by row multiples).
+ *
+ * Precondition: only row 0 of the input is non-zero.
+ * Shifts: -(N/2)*N, -(N/4)*N, …, -N (right-rotations by row multiples).
+ * No depth consumed.
  */
 heongpu::Ciphertext<Scheme>
 replicateRow(const heongpu::Ciphertext<Scheme>& row_initial, int vec_len,
@@ -188,7 +217,10 @@ replicateRow(const heongpu::Ciphertext<Scheme>& row_initial, int vec_len,
 
 /**
  * @brief ReplC (Algorithm 12): replicate column 0 across all N columns.
- * Shifts: -1, -2, -4, …, -(N/2)  (right-rotations by column offsets).
+ *
+ * Precondition: only column 0 is non-zero.
+ * Shifts: -1, -2, -4, …, -(N/2).
+ * No depth consumed.
  */
 heongpu::Ciphertext<Scheme>
 replicateColumn(const heongpu::Ciphertext<Scheme>& col_initial, int vec_len,
@@ -210,9 +242,10 @@ replicateColumn(const heongpu::Ciphertext<Scheme>& col_initial, int vec_len,
 }
 
 /**
- * @brief TransR (Algorithm 1): transpose row vector to column vector.
- * Shifts: -(N*(N-1)/2^i) for i=1..logN, then MaskC(X,0).
- * Depth consumed: 1 (multiply_plain mask + rescale).
+ * @brief TransR (Algorithm 1): transpose row 0 into a column vector.
+ *
+ * Shifts: -(N*(N-1)/2^i) for i=1..logN, then MaskC to zero all but column 0.
+ * Depth consumed: 1 (MaskC multiply_plain + rescale).
  */
 heongpu::Ciphertext<Scheme>
 transposeRowToColumn(const heongpu::Ciphertext<Scheme>& row_vector, int vec_len,
@@ -249,66 +282,95 @@ transposeRowToColumn(const heongpu::Ciphertext<Scheme>& row_vector, int vec_len,
 }
 
 /**
- * @brief Chebyshev sign approximation (comparison function).
- * Approximates sign(x) on [-1,1] with degree-D Chebyshev polynomial via BSGS.
- * Depth consumed: ceil(log2(degree)) ≈ 11 for degree=2047.
+ * @brief Chebyshev sign approximation on domain [a, b].
+ *
+ * Depth consumed: ceil(log2(degree)) levels (BSGS).
+ * Default domain [-1, 1]; the input must lie within [a, b].
  */
 heongpu::Ciphertext<Scheme>
-chebyshev_sign_approx(heongpu::Ciphertext<Scheme>& ct_diff,
+chebyshev_sign_approx(heongpu::Ciphertext<Scheme>& ct,
                       CKKSPolyEvaluator& poly_eval,
                       heongpu::Relinkey<Scheme>& relin_key, double scale,
-                      int degree = 2047)
+                      int degree = 255, double a = -1.0, double b = 1.0)
 {
     if (g_verbose)
-        std::cout << "  Sign approx degree=" << degree << "...\n";
+        std::cout << "  Sign approx degree=" << degree
+                  << " domain=[" << a << "," << b << "]...\n";
     auto sign_fn = [](Complex64 x) -> Complex64 {
         double re = x.real();
         return Complex64(re > 0 ? 1.0 : (re < 0 ? -1.0 : 0.0), 0.0);
     };
-    auto coeffs = heongpu::approximate_function(sign_fn, -1.0, 1.0, degree);
-    return poly_eval.eval_chebyshev(ct_diff, scale, coeffs, degree, relin_key,
-                                    -1.0, 1.0);
+    auto coeffs = heongpu::approximate_function(sign_fn, a, b, degree);
+    return poly_eval.eval_chebyshev(ct, scale, coeffs, degree, relin_key, a, b);
 }
 
 /**
- * @brief Chebyshev indicator approximation: Ind0(x) ≈ 1 when |x| < 0.5, 0 otherwise.
+ * @brief Composite-sign indicator: Ind0(x) ≈ 0.5*(sign(x+0.5) − sign(x−0.5)).
  *
- * Applied to (rank[j] − k) after the subtraction of the rank-constant matrix.
- * Domain [−(N−1), N−1] covers all possible rank differences for an N-element vector.
+ * Returns 2·Ind0(x): ≈ 2 when x ≈ 0, ≈ 0 when |x| ≥ 1.
+ * Callers must divide decoded output by 2.
  *
- * Depth consumed: ceil(log2(degree)) levels (≈10 for degree=1023).
+ * Why composite sign: a direct Chebyshev polynomial approximation of
+ * 1_{|x|<0.5} on [-N,N] suffers the Gibbs/Runge phenomenon — coefficients
+ * blow up, and CKKS Chebyshev evaluation interprets the input as already in
+ * [-1,1] internally (T_d(ct) overflows for |ct|>1).  The composite-sign form
+ * avoids both issues: sign is bounded by construction, and after normalizing
+ * ct by 1/N the two calls land on the well-conditioned [-1,1] domain.
  *
- * Accuracy note: degree-1023 provides reliable discrimination for N ≤ 32 where the
- * Chebyshev node spacing near x=0 is much smaller than the rank error from the sign
- * approximation. For N > 32 the indicator may misclassify elements with close ranks.
+ * Input ct_input: integer-valued (rank_0(j) - k), range [-(N-1), N-1].
+ * Depth consumed: 1 (normalize rescale) + ceil(log2(degree)) (sign).
  */
 heongpu::Ciphertext<Scheme>
 chebyshev_indicator_approx(heongpu::Ciphertext<Scheme>& ct_input, int vec_len,
                            CKKSPolyEvaluator& poly_eval,
                            heongpu::Relinkey<Scheme>& relin_key, double scale,
-                           int degree = 1023)
+                           heongpu::HEContext<Scheme>& context,
+                           int degree = 255)
 {
+    double invN    = 1.0 / vec_len;
+    double halfInv = 0.5 / vec_len;
+
     if (g_verbose)
-        std::cout << "  Indicator approx degree=" << degree
-                  << " domain=[" << -(vec_len - 1) << "," << (vec_len - 1) << "]\n";
-    auto ind0 = [](Complex64 x) -> Complex64 {
-        return Complex64(std::abs(x.real()) < 0.5 ? 1.0 : 0.0, 0.0);
-    };
-    double a = -(double)(vec_len - 1);
-    double b =  (double)(vec_len - 1);
-    auto coeffs = heongpu::approximate_function(ind0, a, b, degree);
-    return poly_eval.eval_chebyshev(ct_input, scale, coeffs, degree, relin_key,
-                                    a, b);
+        std::cout << "  Indicator degree=" << degree
+                  << " (normalize ×1/" << vec_len
+                  << ", threshold ±" << halfInv << ")\n";
+
+    // Normalize to [-1,1] (×1/N + rescale, costs 1 level)
+    heongpu::Ciphertext<Scheme> ct_norm = ct_input;
+    poly_eval.multiply_plain_inplace(ct_norm, invN, scale);
+    poly_eval.rescale_inplace(ct_norm);
+
+    // Shift by ±0.5/N (add_plain, free)
+    heongpu::Ciphertext<Scheme> ct_plus  = ct_norm;
+    poly_eval.add_plain_inplace(ct_plus,  halfInv);
+    heongpu::Ciphertext<Scheme> ct_minus = ct_norm;
+    poly_eval.add_plain_inplace(ct_minus, -halfInv);
+
+    // Two sign evaluations on [-1,1]; both start from the same level
+    if (g_verbose) std::cout << "  sign(x/" << vec_len << " + " << halfInv << "):\n";
+    heongpu::Ciphertext<Scheme> sign_plus =
+        chebyshev_sign_approx(ct_plus,  poly_eval, relin_key, scale, degree);
+    if (g_verbose) std::cout << "  sign(x/" << vec_len << " - " << halfInv << "):\n";
+    heongpu::Ciphertext<Scheme> sign_minus =
+        chebyshev_sign_approx(ct_minus, poly_eval, relin_key, scale, degree);
+
+    // sign_plus - sign_minus ≈ 2 * Ind0(ct_input)
+    heongpu::Ciphertext<Scheme> result(context);
+    poly_eval.sub(sign_plus, sign_minus, result);
+    return result;
 }
 
 /**
- * @brief SumR (Algorithm 9): fold all rows into row 0.
- * Shifts: +N, +2N, +4N, …  (positive = left-rotation, row-fold).
- * No level consumed.
+ * @brief SumR: fold all N rows into every row by cyclic tree-fold.
+ *
+ * Shifts: +N, +2N, +4N, … (left-rotations by row multiples).
+ * After logN steps, position [k,j] of the result equals the sum of column j
+ * across ALL N input rows — this is true for every row k, not just row 0.
+ * No depth consumed.
  */
 heongpu::Ciphertext<Scheme>
 sumRows(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
-        heongpu::Galoiskey<Scheme>& sumr_galois_key,
+        heongpu::Galoiskey<Scheme>& galois_key,
         CKKSPolyEvaluator& evaluator)
 {
     heongpu::Ciphertext<Scheme> result = ct_matrix;
@@ -319,7 +381,7 @@ sumRows(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
         int shift = vec_len * (1 << i);
         if (g_verbose) std::cout << "+" << shift << " ";
         heongpu::Ciphertext<Scheme> rotated = result;
-        evaluator.rotate_rows_inplace(rotated, sumr_galois_key, shift);
+        evaluator.rotate_rows_inplace(rotated, galois_key, shift);
         evaluator.add_inplace(result, rotated);
     }
     if (g_verbose) std::cout << "\n";
@@ -327,21 +389,16 @@ sumRows(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
 }
 
 /**
- * @brief SumC (Algorithm 10): fold all N columns into column 0.
+ * @brief SumC: fold all N columns into column 0 by cyclic tree-fold.
  *
- * Uses positive shifts +1, +2, +4, …, +N/2 (left-rotations, ≪ in paper notation).
- * After logN iterations, position k*N (column 0 of row k) holds the sum of all
- * N values in row k. Columns 1..N-1 contain garbage; callers must handle this.
- *
- * Correctness: for a row-major N×N matrix, left-rotating by 2^i brings column 2^i
- * into column 0 without cross-row contamination at column 0, because 2^i < N for all
- * i < logN. The garbage in non-zero columns does NOT affect column 0.
- *
- * No level consumed (rotations and additions do not change depth).
+ * Shifts: +1, +2, +4, …, +N/2 (left-rotations).
+ * After logN steps, position [k,0] holds the sum of row k across all N columns.
+ * Columns 1..N-1 contain garbage after the fold; read only column 0.
+ * No depth consumed.
  */
 heongpu::Ciphertext<Scheme>
 sumColumns(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
-           heongpu::Galoiskey<Scheme>& sumc_galois_key,
+           heongpu::Galoiskey<Scheme>& galois_key,
            CKKSPolyEvaluator& evaluator)
 {
     heongpu::Ciphertext<Scheme> result = ct_matrix;
@@ -349,10 +406,10 @@ sumColumns(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
     if (g_verbose) std::cout << "  SumC shifts: ";
     for (int i = 0; i < log_n; i++)
     {
-        int shift = 1 << i; // +1, +2, +4, …
+        int shift = 1 << i;
         if (g_verbose) std::cout << "+" << shift << " ";
         heongpu::Ciphertext<Scheme> rotated = result;
-        evaluator.rotate_rows_inplace(rotated, sumc_galois_key, shift);
+        evaluator.rotate_rows_inplace(rotated, galois_key, shift);
         evaluator.add_inplace(result, rotated);
     }
     if (g_verbose) std::cout << "\n";
@@ -360,123 +417,142 @@ sumColumns(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
 }
 
 // ---------------------------------------------------------------------------
-// Algorithm 3: basicRank
+// Phase 1: computeRankMatrix
 // ---------------------------------------------------------------------------
 /**
- * @brief Algorithm 3 (Rank): compute 1-based fractional rank of each element.
+ * @brief Compute the N×N rank matrix R.
  *
- * Depth budget (28 levels available with n=65536, 29 Q primes):
- *   depth 0  → fresh ciphertext
+ * Output: R[k,j] = rank_0(v[j]) + 0.5  for every row k.
+ *   rank_0(v[j]) = #{i : v[i] < v[j]}  (0-based, 0 for minimum, N-1 for maximum)
+ *
+ * How: compare(VR,VC) gives ≈ 1 if v[j]>v[k], ≈ 0 if v[j]<v[k], ≈ 0.5 if equal.
+ * Summing over k: sum_k compare(v[j],v[k]) = rank_0(v[j]) + 0.5.
+ * After SumR the result is the same in EVERY row (cyclic fold).
+ *
+ * Depth budget:
+ *   depth 0  → fresh
  *   depth 1  → TransR (MaskC multiply_plain + rescale)
- *   depth 1  → mod_drop ct_row for alignment
- *   depth 12 → Chebyshev sign degree-2047 (11 levels, BSGS)
- *   depth 12 → add_plain +1, SumR (free)
- *   depth 13 → multiply_plain(0.5, scale) + rescale (scalar ÷2)
- *   depth 13 → add_plain +0.5 (completes 1-based fractional rank)
- *   Total consumed: 13 ≤ 28 ✓
- *
- * Output: position j (0 ≤ j < N) in row 0 holds rank[j] (1-based fractional).
+ *   depth 1  → mod_drop VR to match VC
+ *   depth 10 → sign degree-255 (9 levels, BSGS)
+ *   depth 10 → add_plain +1, SumR (free)
+ *   depth 11 → multiply_plain 0.5 + rescale
+ *   Total: 11 levels consumed.
  */
+static heongpu::HEContext<Scheme>* g_dbg_ctx = nullptr;
+static void dbg_decrypt(const std::string& label,
+                        heongpu::Ciphertext<Scheme>& ct,
+                        heongpu::HEDecryptor<Scheme>& dec,
+                        heongpu::HEEncoder<Scheme>& enc, int N)
+{
+    heongpu::Plaintext<Scheme> pt(*g_dbg_ctx);
+    dec.decrypt(pt, ct);
+    std::vector<double> vals;
+    enc.decode(vals, pt);
+    std::cout << "[DBG] " << label << " (first " << N*N << " slots):\n";
+    for (int k = 0; k < N; k++) {
+        std::cout << "  row " << k << ": ";
+        for (int j = 0; j < N; j++)
+            std::cout << std::setw(8) << std::setprecision(3) << std::fixed
+                      << vals[k*N+j] << " ";
+        std::cout << "\n";
+    }
+    std::cout << std::flush;
+}
+
 heongpu::Ciphertext<Scheme>
-basicRank(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
-          heongpu::Galoiskey<Scheme>& row_galois_key,
-          heongpu::Galoiskey<Scheme>& col_galois_key,
-          heongpu::Galoiskey<Scheme>& transpose_galois_key,
-          heongpu::Galoiskey<Scheme>& sumr_galois_key,
-          heongpu::Relinkey<Scheme>& relin_key,
-          CKKSPolyEvaluator& evaluator,
-          heongpu::HEEncoder<Scheme>& encoder,
-          heongpu::HEContext<Scheme>& context, double scale)
+computeRankMatrix(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
+                  heongpu::Galoiskey<Scheme>& row_galois_key,
+                  heongpu::Galoiskey<Scheme>& col_galois_key,
+                  heongpu::Galoiskey<Scheme>& transpose_galois_key,
+                  heongpu::Galoiskey<Scheme>& sumr_galois_key,
+                  heongpu::Relinkey<Scheme>& relin_key,
+                  CKKSPolyEvaluator& evaluator,
+                  heongpu::HEEncoder<Scheme>& encoder,
+                  heongpu::HEContext<Scheme>& context, double scale)
 {
     if (g_verbose)
-        std::cout << "\n=== Ranking (N=" << vec_len << ") ===\n"
-                  << "Step 1: ReplR...\n" << std::flush;
+        std::cout << "\n=== computeRankMatrix (N=" << vec_len << ") ===\n"
+                  << "Step 1: ReplR(V)...\n" << std::flush;
 
-    heongpu::Ciphertext<Scheme> ct_row =
+    heongpu::Ciphertext<Scheme> ct_vr =
         replicateRow(ct_vector, vec_len, row_galois_key, evaluator);
 
-    if (g_verbose) std::cout << "Step 2: TransR + ReplC...\n" << std::flush;
+    if (g_verbose) std::cout << "Step 2: TransR(V) + ReplC(V)...\n" << std::flush;
     heongpu::Ciphertext<Scheme> ct_col_t =
         transposeRowToColumn(ct_vector, vec_len, transpose_galois_key,
                              evaluator, encoder, context, scale);
-    heongpu::Ciphertext<Scheme> ct_col =
+    heongpu::Ciphertext<Scheme> ct_vc =
         replicateColumn(ct_col_t, vec_len, col_galois_key, evaluator);
 
-    // Align ct_row level down to match ct_col (TransR consumed 1 level)
-    while (ct_row.level() > ct_col.level())
+    // TransR consumed 1 level; align VR down to match VC
+    while (ct_vr.level() > ct_vc.level())
     {
         heongpu::Ciphertext<Scheme> tmp(context);
-        evaluator.mod_drop(ct_row, tmp);
-        ct_row = std::move(tmp);
+        evaluator.mod_drop(ct_vr, tmp);
+        ct_vr = std::move(tmp);
     }
 
-    if (g_verbose) std::cout << "Step 3: Compute diff (vR - vC)...\n" << std::flush;
+    // compare(VR, VC) = 0.5*(sign(VR-VC) + 1): use sign then shift
+    if (g_verbose) std::cout << "Step 3: diff = VR - VC...\n" << std::flush;
     heongpu::Ciphertext<Scheme> ct_diff(context);
-    evaluator.sub(ct_row, ct_col, ct_diff);
+    evaluator.sub(ct_vr, ct_vc, ct_diff);
 
-    if (g_verbose) std::cout << "Step 4: Chebyshev sign approx...\n" << std::flush;
+    if (g_verbose) std::cout << "Step 4: sign(diff)...\n" << std::flush;
     heongpu::Ciphertext<Scheme> ct_sign =
-        chebyshev_sign_approx(ct_diff, evaluator, relin_key, scale, 2047);
+        chebyshev_sign_approx(ct_diff, evaluator, relin_key, scale, 255);
 
-    if (g_verbose) std::cout << "Step 5: Add 1 (shift {-1,0,+1} → {0,1,2})...\n" << std::flush;
+    // shift sign ∈ [-1,1] → compare ∈ [0,1]: add 1 (free), then ×0.5
+    if (g_verbose) std::cout << "Step 5: add 1 (sign → compare range), SumR...\n" << std::flush;
     evaluator.add_plain_inplace(ct_sign, 1.0);
 
-    if (g_verbose) std::cout << "Step 6: SumR (row-fold)...\n" << std::flush;
-    heongpu::Ciphertext<Scheme> ct_sumr =
+    heongpu::Ciphertext<Scheme> ct_r =
         sumRows(ct_sign, vec_len, sumr_galois_key, evaluator);
+    // ct_r[k,j] = sum_i (sign(v[j]-v[i])+1) = rank_0(v[j])*2 + 1  in all rows
 
-    // ÷2 via scalar multiply_plain (double overload — no depth check)
-    if (g_verbose) std::cout << "Step 7: Scale by 0.5 + rescale...\n" << std::flush;
-    evaluator.multiply_plain_inplace(ct_sumr, 0.5, scale);
-    evaluator.rescale_inplace(ct_sumr); // depth 12 → 13
+    if (g_verbose) std::cout << "Step 6: ×0.5 + rescale → R[j] = rank_0(j)+0.5...\n" << std::flush;
+    evaluator.multiply_plain_inplace(ct_r, 0.5, scale);
+    evaluator.rescale_inplace(ct_r); // depth +1
 
-    if (g_verbose) std::cout << "Step 8: Add 0.5 (complete fractional rank)...\n" << std::flush;
-    evaluator.add_plain_inplace(ct_sumr, 0.5);
-
-    if (g_verbose) std::cout << "Ranking complete (depth=13).\n" << std::flush;
-    return ct_sumr;
+    if (g_verbose)
+        std::cout << "computeRankMatrix done. R[k,j] = rank_0(v[j])+0.5 in all rows."
+                  << " level=" << ct_r.level() << "\n" << std::flush;
+    return ct_r;
 }
 
 // ---------------------------------------------------------------------------
-// Algorithm 5: homomorphicSort
+// Phase 2+3: orderStatistics (= homomorphicSort)
 // ---------------------------------------------------------------------------
 /**
- * @brief Algorithm 5 (Sort): homomorphically sort an encrypted vector.
+ * @brief Compute all N order statistics of an encrypted vector.
  *
  * Preconditions:
- *   - ct_vector encrypts a normalized vector in [0,1] with distinct elements.
- *   - N = vec_len is a power of 2 with N² ≤ 32768 (i.e., N ≤ 128).
+ *   - ct_vector: normalized to [0,1], N distinct values.
+ *   - N = vec_len, power of 2, N² ≤ 32768 (N ≤ 128).
  *
- * Depth budget (28 levels available):
- *   depth 13  → basicRank output
- *   depth 13  → ReplR(rank) [free], ciphertext subtract rank-constants [free]
- *   depth 23  → chebyshev_indicator_approx degree-1023 (+10 levels)
- *   depth 23  → mod_drop VR from 0 to 23 [free: only drops primes]
- *   depth 24  → multiply(M, VR) + relinearize + rescale (+1 level)
- *   depth 24  → SumC rotations [free]
- *   Total consumed: 24 ≤ 28 ✓  (4 levels spare)
+ * Algorithm (directly follows OpenFHE reference sort()):
+ *   1. R = computeRankMatrix(V)      // depth 11; R[k,j]=rank_0(j)+0.5 in ALL rows
+ *   2. subMask[k,j] = -(k+0.5)       // encrypted, mod-dropped to R's level
+ *   3. ct_diff = R + subMask          // ct_diff[k,j] = rank_0(j)-k  (integer)
+ *   4. M = Ind0(ct_diff)              // M[k,j] ≈ 1 iff rank_0(j)=k  (one-hot)
+ *   5. VR = ReplR(V), mod_drop        // fresh VR at level of M
+ *   6. S = SumC(M · VR)               // S[k,col0] = (k+1)-th order statistic
  *
- * Output layout ("column format"):
- *   The returned ciphertext has the sorted values at positions k*N for k=0..N-1.
- *   Position k*N holds the (k+1)-th order statistic (0-indexed: k=0 → minimum).
- *   Clients extract sorted[k] = decoded_slots[k * vec_len].
+ * No MaskR or ReplR of the rank matrix: SumR already fills all rows identically,
+ * so step 1's output is ready for step 2 without any masking or replication.
+ * This matches the OpenFHE reference implementation.
  *
- * Why column format instead of Algorithm 5's TransC step:
- *   TransC and its MaskR require multiply_plain(Ciphertext, Plaintext) at depth ≥24.
- *   In HEonGPU, freshly-encoded Plaintexts always have depth=0, so this throws a
- *   depth-mismatch error. Encrypting the mask ciphertext and using ct×ct multiply
- *   (with relinearization) would be correct but costs an extra level and is ~10×
- *   slower. Omitting TransC and reading every N-th slot is equivalent and free.
- *   The same constraint applies to MaskC after SumC: column 0 is always correct
- *   (SumC rotations < N guarantee no cross-row contamination at column 0), so
- *   we skip MaskC too — column 0 is read directly by the client.
+ * Depth budget:
+ *   depth 11 → computeRankMatrix output
+ *   depth 11 → add subMask (ct+ct, free)
+ *   depth 12 → indicator normalize rescale (+1)
+ *   depth 21 → indicator sign×2 (+9 levels)
+ *   depth 21 → mod_drop VR (free)
+ *   depth 22 → multiply(M, VR) + relin + rescale (+1)
+ *   depth 22 → SumC (free)
+ *   Total: 22 ≤ 28 ✓
  *
- * Why rank_constants are encrypted as a ciphertext:
- *   The rank-constant matrix (row k = k+1 for all j) must be subtracted from
- *   ReplR(rank) at depth 13. Since add_plain(Ciphertext, Plaintext) also checks
- *   depth equality in HEonGPU (and Plaintext.depth_=0 always), the subtraction
- *   is done as a ciphertext op: encrypt rank_constants → mod_drop to depth 13 →
- *   ct subtract. Encrypting public constants is valid; noise is negligible.
+ * Output: column format — slot k*N holds the (k+1)-th order statistic.
+ * Decoded output must be divided by 2 (indicator returns 2·Ind0).
  */
 heongpu::Ciphertext<Scheme>
 homomorphicSort(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
@@ -489,66 +565,62 @@ homomorphicSort(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
                 CKKSPolyEvaluator& evaluator,
                 heongpu::HEEncoder<Scheme>& encoder,
                 heongpu::HEEncryptor<Scheme>& encryptor,
+                heongpu::HEDecryptor<Scheme>& decryptor,
                 heongpu::HEContext<Scheme>& context,
                 double scale)
 {
     size_t total_slots = context->get_poly_modulus_degree() / 2;
 
-    // ── Step 1: R = Rank(V) ──────────────────────────────────────────────
+    // ── Phase 1: R = RankMatrix(V) ───────────────────────────────────────────
     if (g_verbose) std::cout << "\n=== homomorphicSort (N=" << vec_len << ") ===\n" << std::flush;
     heongpu::Ciphertext<Scheme> ct_rank =
-        basicRank(ct_vector, vec_len,
-                  row_galois_key, col_galois_key,
-                  transpose_galois_key, sumr_galois_key,
-                  relin_key, evaluator, encoder, context, scale);
-    // depth 13
+        computeRankMatrix(ct_vector, vec_len,
+                          row_galois_key, col_galois_key,
+                          transpose_galois_key, sumr_galois_key,
+                          relin_key, evaluator, encoder, context, scale);
+    // ct_rank[k,j] = rank_0(v[j]) + 0.5  in EVERY row k (no masking needed)
+    if (g_verbose) dbg_decrypt("ct_rank (all rows)", ct_rank, decryptor, encoder, vec_len);
 
-    // ── Step 2: RR = ReplR(R) ────────────────────────────────────────────
-    if (g_verbose) std::cout << "\nStep 2: ReplR(rank)...\n" << std::flush;
-    heongpu::Ciphertext<Scheme> ct_rr =
-        replicateRow(ct_rank, vec_len, row_galois_key, evaluator);
-    // depth 13
+    // ── Phase 2: One-hot mask M = Ind0(R − subMask) ──────────────────────────
+    // subMask[k,j] = -(k+0.5) so that R[k,j] + subMask[k,j] = rank_0(j) - k.
+    // M[k,j] ≈ 1 iff rank_0(v[j]) = k, i.e. v[j] is the (k+1)-th smallest.
+    if (g_verbose) std::cout << "\nPhase 2: build & subtract rank-target matrix...\n" << std::flush;
 
-    // ── Step 3: M = Ind0(RR − rank_constants) ───────────────────────────
-    // rank_constants[k][j] = k+1 for all j in row k.
-    // Subtract by adding negated constants encrypted as a ciphertext.
-    if (g_verbose) std::cout << "\nStep 3a: Build & encrypt rank-constants matrix...\n" << std::flush;
-
-    std::vector<double> rank_consts_neg(total_slots, 0.0);
+    std::vector<double> sub_mask_vals(total_slots, 0.0);
     for (int k = 0; k < vec_len; k++)
         for (int j = 0; j < vec_len; j++)
-            rank_consts_neg[k * vec_len + j] = -(double)(k + 1);
+            sub_mask_vals[k * vec_len + j] = -(k + 0.5);
 
-    heongpu::Plaintext<Scheme> pt_consts(context);
-    encoder.encode(pt_consts, rank_consts_neg, scale);
-    heongpu::Ciphertext<Scheme> ct_consts(context);
-    encryptor.encrypt(ct_consts, pt_consts);
-    // Align ct_consts level to ct_rr using non-inplace mod_drop (mod_drop_inplace
-    // does NOT update depth_, mod_drop(in,out) sets out.depth_ = in.depth_ + 1).
-    while (ct_consts.level() > ct_rr.level())
+    heongpu::Plaintext<Scheme> pt_sub(context);
+    encoder.encode(pt_sub, sub_mask_vals, scale);
+    heongpu::Ciphertext<Scheme> ct_sub(context);
+    encryptor.encrypt(ct_sub, pt_sub);
+    // mod_drop to match ct_rank's level
+    while (ct_sub.level() > ct_rank.level())
     {
         heongpu::Ciphertext<Scheme> tmp(context);
-        evaluator.mod_drop(ct_consts, tmp);
-        ct_consts = std::move(tmp);
+        evaluator.mod_drop(ct_sub, tmp);
+        ct_sub = std::move(tmp);
     }
     if (g_verbose)
-        std::cout << "  ct_rr level=" << ct_rr.level()
-                  << "  ct_consts level=" << ct_consts.level() << "\n" << std::flush;
+        std::cout << "  ct_rank level=" << ct_rank.level()
+                  << "  ct_sub level=" << ct_sub.level() << "\n" << std::flush;
 
-    if (g_verbose) std::cout << "Step 3b: Subtract rank-constants (ct - ct)...\n" << std::flush;
     heongpu::Ciphertext<Scheme> ct_diff(context);
-    evaluator.add(ct_rr, ct_consts, ct_diff); // adds negated constants = subtract
+    evaluator.add(ct_rank, ct_sub, ct_diff);
+    // ct_diff[k,j] = rank_0(v[j]) - k  (integer ∈ {-(N-1), …, 0, …, N-1})
 
-    if (g_verbose) std::cout << "Step 3c: Indicator Ind0 (degree 1023)...\n" << std::flush;
+    if (g_verbose) dbg_decrypt("ct_diff (rank - target)", ct_diff, decryptor, encoder, vec_len);
+    if (g_verbose) std::cout << "Phase 2: indicator (composite sign, degree=255)...\n" << std::flush;
     heongpu::Ciphertext<Scheme> ct_mask =
-        chebyshev_indicator_approx(ct_diff, vec_len, evaluator, relin_key, scale, 1023);
-    // depth 23; M[k][j] ≈ 1 iff rank[j] ≈ k+1, else ≈ 0
+        chebyshev_indicator_approx(ct_diff, vec_len, evaluator, relin_key, scale, context);
+    // ct_mask[k,j] ≈ 2 iff rank_0(v[j])=k, else ≈ 0
+    if (g_verbose) dbg_decrypt("ct_mask (one-hot indicator)", ct_mask, decryptor, encoder, vec_len);
 
-    // ── Step 4: VR = ReplR(V), aligned to depth 23 ──────────────────────
-    if (g_verbose) std::cout << "\nStep 4: ReplR(V) + mod_drop to depth 23...\n" << std::flush;
+    // ── Phase 3: Reconstruct sorted values ───────────────────────────────────
+    if (g_verbose) std::cout << "\nPhase 3: ReplR(V) + mod_drop to indicator level...\n" << std::flush;
     heongpu::Ciphertext<Scheme> ct_vr =
         replicateRow(ct_vector, vec_len, row_galois_key, evaluator);
-    // Align ct_vr level to ct_mask using non-inplace mod_drop
     while (ct_vr.level() > ct_mask.level())
     {
         heongpu::Ciphertext<Scheme> tmp(context);
@@ -558,26 +630,24 @@ homomorphicSort(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
     if (g_verbose)
         std::cout << "  ct_mask level=" << ct_mask.level()
                   << "  ct_vr level=" << ct_vr.level() << "\n" << std::flush;
+    if (g_verbose) dbg_decrypt("ct_vr", ct_vr, decryptor, encoder, vec_len);
 
-    // ── Step 5: M · VR, then SumC ────────────────────────────────────────
-    if (g_verbose) std::cout << "\nStep 5a: multiply(M, VR) + relin + rescale...\n" << std::flush;
+    if (g_verbose) std::cout << "Phase 3: multiply(M, VR) + relin + rescale...\n" << std::flush;
     heongpu::Ciphertext<Scheme> ct_product(context);
     evaluator.multiply(ct_mask, ct_vr, ct_product);
     evaluator.relinearize_inplace(ct_product, relin_key);
     evaluator.rescale_inplace(ct_product);
-    // depth 24
 
-    if (g_verbose) std::cout << "Step 5b: SumC (fold columns into column 0)...\n" << std::flush;
-    heongpu::Ciphertext<Scheme> ct_sorted_col =
+    if (g_verbose) std::cout << "Phase 3: SumC...\n" << std::flush;
+    heongpu::Ciphertext<Scheme> ct_sorted =
         sumColumns(ct_product, vec_len, sumc_galois_key, evaluator);
-    // depth 24
-    // Column 0 of each row k holds the (k+1)-th order statistic.
-    // TransC (column→row transposition) is omitted — see class-level note.
+    // ct_sorted[k, col0] = (k+1)-th order statistic × 2
+    // (the ×2 comes from the indicator returning 2·Ind0)
 
     if (g_verbose)
-        std::cout << "Sort complete (depth=24). "
-                     "Output in column format: slot k*N = (k+1)-th statistic.\n" << std::flush;
-    return ct_sorted_col;
+        std::cout << "Sort complete. depth=" << ct_sorted.level()
+                  << ". Slot k*N = (k+1)-th statistic × 2.\n" << std::flush;
+    return ct_sorted;
 }
 
 // ---------------------------------------------------------------------------
@@ -585,8 +655,7 @@ homomorphicSort(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[])
 {
-    // Parse args
-    int vec_len   = 8;
+    int vec_len    = 8;
     bool bench_mode = false;
     for (int i = 1; i < argc; i++)
     {
@@ -609,33 +678,29 @@ int main(int argc, char* argv[])
     // ── HE Context ──────────────────────────────────────────────────────────
     heongpu::HEContext<Scheme> context = heongpu::GenHEContext<Scheme>();
 
-    // n = 65536 → 32768 available slots, supports N² ≤ 32768 (N ≤ 128 for pow-of-2).
-    //
-    // Q = 60 + 28×40 = 1180 bits (29 primes, 28 computation levels)
-    // P = 7×60       =  420 bits
-    // Q+P             = 1600 bits < 1746 = heongpu_128bit_std_parms(65536) ✓
-    //
-    // Depth budget: 28 usable levels. Sort consumes 24; 4 spare.
+    // n = 65536 → 32768 slots; 31 computation levels available.
+    // Algorithm consumes 22 levels; 9 spare.
     const size_t poly_modulus_degree = 65536;
     context->set_poly_modulus_degree(poly_modulus_degree);
     context->set_coeff_modulus_bit_sizes(
         {60, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40,
-             40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40}, // 29 Q primes
-        {60, 60, 60, 60, 60, 60, 60});                                 // 7 P primes
+             40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40,
+             40, 40, 40}, // 32 Q primes (31 computation levels)
+        {60, 60, 60, 60, 60, 60, 60});                               // 7 P primes
 
     double scale = std::pow(2.0, 40);
 
     GPUTimer ctx_timer;
     ctx_timer.startTimer();
     context->generate();
+    g_dbg_ctx = &context;
     float ctx_ms = ctx_timer.stopTimer();
 
     const int available_slots = static_cast<int>(poly_modulus_degree / 2);
     if (vec_len * vec_len > available_slots)
     {
         std::cerr << "Error: N=" << vec_len << " needs " << (vec_len * vec_len)
-                  << " slots but only " << available_slots << " available.\n"
-                  << "Reduce N or increase poly_modulus_degree.\n";
+                  << " slots but only " << available_slots << " available.\n";
         return EXIT_FAILURE;
     }
 
@@ -655,46 +720,45 @@ int main(int argc, char* argv[])
     heongpu::HEDecryptor<Scheme>  decryptor(context, secret_key);
     CKKSPolyEvaluator             evaluator(context, encoder);
 
-    // Compute all Galois shift sets before keygen timer
     int log_n = static_cast<int>(std::ceil(std::log2(vec_len)));
 
-    std::vector<int> row_galois_shifts;    // ReplR: -(N/2)*N, ..., -N
+    std::vector<int> row_shifts;    // ReplR
     for (int i = vec_len / 2; i > 0; i /= 2)
-        row_galois_shifts.push_back(-(i * vec_len));
+        row_shifts.push_back(-(i * vec_len));
 
-    std::vector<int> col_galois_shifts;    // ReplC: -1, -2, -4, ...
+    std::vector<int> col_shifts;    // ReplC
     for (int i = 1; i < vec_len; i *= 2)
-        col_galois_shifts.push_back(-i);
+        col_shifts.push_back(-i);
 
-    std::vector<int> sumr_galois_shifts;   // SumR: +N, +2N, +4N, ...
+    std::vector<int> sumr_shifts;   // SumR
     for (int i = 0; i < log_n; i++)
-        sumr_galois_shifts.push_back(vec_len * (1 << i));
+        sumr_shifts.push_back(vec_len * (1 << i));
 
-    std::vector<int> transr_shifts = transposeGaloisShifts(vec_len); // TransR (neg)
-    std::vector<int> sumc_shifts   = sumcGaloisShifts(vec_len);      // SumC (pos)
+    std::vector<int> transr_shifts = transposeGaloisShifts(vec_len);
+    std::vector<int> sumc_shifts   = sumcGaloisShifts(vec_len);
 
     if (g_verbose)
-        std::cout << "Galois shifts — row: " << row_galois_shifts.size()
-                  << "  col: " << col_galois_shifts.size()
-                  << "  sumr: " << sumr_galois_shifts.size()
+        std::cout << "Galois shifts — row: " << row_shifts.size()
+                  << "  col: " << col_shifts.size()
+                  << "  sumr: " << sumr_shifts.size()
                   << "  transr: " << transr_shifts.size()
                   << "  sumc: " << sumc_shifts.size() << "\n";
 
-    // ── Key generation (timed) ───────────────────────────────────────────────
+    // ── Key generation ───────────────────────────────────────────────────────
     const size_t kMiB = 1024ULL * 1024ULL;
-    size_t gpu_baseline_bytes =
+    size_t gpu_baseline =
         heongpu::MemoryPool::instance().get_current_device_pool_memory_usage();
 
     GPUTimer keygen_timer;
     keygen_timer.startTimer();
 
-    heongpu::Galoiskey<Scheme> row_galois_key(context, row_galois_shifts);
+    heongpu::Galoiskey<Scheme> row_galois_key(context, row_shifts);
     keygen.generate_galois_key(row_galois_key, secret_key);
 
-    heongpu::Galoiskey<Scheme> col_galois_key(context, col_galois_shifts);
+    heongpu::Galoiskey<Scheme> col_galois_key(context, col_shifts);
     keygen.generate_galois_key(col_galois_key, secret_key);
 
-    heongpu::Galoiskey<Scheme> sumr_galois_key(context, sumr_galois_shifts);
+    heongpu::Galoiskey<Scheme> sumr_galois_key(context, sumr_shifts);
     keygen.generate_galois_key(sumr_galois_key, secret_key);
 
     heongpu::Galoiskey<Scheme> transr_galois_key(context, transr_shifts);
@@ -707,7 +771,7 @@ int main(int argc, char* argv[])
     keygen.generate_relin_key(relin_key, secret_key);
 
     float keygen_ms = keygen_timer.stopTimer();
-    size_t gpu_keys_mib = getGPUUsedMiB() - gpu_baseline_bytes / kMiB;
+    size_t gpu_keys_mib = getGPUUsedMiB() - gpu_baseline / kMiB;
     if (g_verbose)
         std::cout << "Key generation: " << keygen_ms << " ms  (keys: "
                   << gpu_keys_mib << " MiB VRAM)\n";
@@ -716,7 +780,6 @@ int main(int argc, char* argv[])
     std::vector<double> input(vec_len);
     if (bench_mode)
     {
-        // Uniform random, seeded for reproducibility
         std::mt19937 rng(42);
         std::uniform_real_distribution<double> dist(0.0, 100.0);
         for (int i = 0; i < vec_len; i++)
@@ -724,12 +787,10 @@ int main(int argc, char* argv[])
     }
     else
     {
-        // Shuffled: 0..(N-1) in reverse, easy to verify sorted output
         for (int i = 0; i < vec_len; i++)
             input[i] = static_cast<double>(vec_len - 1 - i);
     }
 
-    // Reference sort (for verification)
     std::vector<double> input_sorted = input;
     std::sort(input_sorted.begin(), input_sorted.end());
 
@@ -737,15 +798,14 @@ int main(int argc, char* argv[])
 
     if (g_verbose)
     {
-        std::cout << "Original input: ";
+        std::cout << "Original input:          ";
         display_vector(input, vec_len);
-        std::cout << "Normalized:     ";
+        std::cout << "Normalized [0,1]:        ";
         display_vector(normalized, vec_len);
-        std::cout << "Expected sorted (original): ";
+        std::cout << "Expected sorted (orig):  ";
         display_vector(input_sorted, vec_len);
     }
 
-    // Encode into full slot buffer
     std::vector<double> slot_buf(available_slots, 0.0);
     for (int i = 0; i < vec_len; i++)
         slot_buf[i] = normalized[i];
@@ -764,12 +824,12 @@ int main(int argc, char* argv[])
                         row_galois_key, col_galois_key,
                         sumr_galois_key, transr_galois_key,
                         sumc_galois_key, relin_key,
-                        evaluator, encoder, encryptor, context, scale);
+                        evaluator, encoder, encryptor, decryptor, context, scale);
 
     float sort_ms = sort_timer.stopTimer();
     size_t gpu_sort_mib =
         (heongpu::MemoryPool::instance().get_current_device_pool_memory_usage()
-         - gpu_baseline_bytes) / kMiB;
+         - gpu_baseline) / kMiB;
     size_t gpu_peak_mib = getPeakGPUMiB();
 
     // ── Decrypt and decode ───────────────────────────────────────────────────
@@ -778,12 +838,13 @@ int main(int argc, char* argv[])
     std::vector<double> sort_result;
     encoder.decode(sort_result, sort_plaintext);
 
-    // Extract column format: sorted[k] = slot k*N
+    // Extract column format: sorted[k] = slot k*N.
+    // Divide by 2: indicator returns 2·Ind0.
     std::vector<double> he_sorted(vec_len);
     for (int k = 0; k < vec_len; k++)
-        he_sorted[k] = sort_result[k * vec_len];
+        he_sorted[k] = sort_result[k * vec_len] / 2.0;
 
-    // Denormalize for comparison with original input
+    // Denormalize
     double lo    = *std::min_element(input.begin(), input.end());
     double hi    = *std::max_element(input.begin(), input.end());
     double range = hi - lo;
@@ -794,7 +855,6 @@ int main(int argc, char* argv[])
     // ── Output ───────────────────────────────────────────────────────────────
     if (bench_mode)
     {
-        // rank_ms excluded; sort_ms covers full ranking+sorting protocol
         std::cout << "BENCH:"
                   << " N=" << vec_len
                   << " ctx_ms=" << ctx_ms
@@ -807,12 +867,11 @@ int main(int argc, char* argv[])
     else
     {
         std::cout << "\n=== Sorting Results ===\n";
-        std::cout << "HE sorted (normalized):  ";
+        std::cout << "HE sorted (normalized):     ";
         display_vector(he_sorted, vec_len);
         std::cout << "HE sorted (original scale): ";
         display_vector(he_sorted_denorm, vec_len);
 
-        // Verify monotonicity and approximate correctness
         std::cout << "\nVerification:\n";
         bool monotone    = true;
         bool all_correct = true;
@@ -832,16 +891,16 @@ int main(int argc, char* argv[])
         }
         std::cout << (monotone    ? "  Monotone: YES\n"   : "  Monotone: NO\n");
         std::cout << (all_correct ? "  Values: all correct\n"
-                                  : "  Values: some incorrect (check N or degree)\n");
+                                  : "  Values: some incorrect\n");
 
         std::cout << "\nTiming:\n";
         std::cout << "  Key generation : " << keygen_ms << " ms\n";
-        std::cout << "  Sort (rank+sort): " << sort_ms << " ms  ("
+        std::cout << "  Sort           : " << sort_ms << " ms  ("
                   << (sort_ms / 1000.0) << " s)\n";
-        std::cout << "\nVRAM usage (above context baseline):\n";
-        std::cout << "  Keys  : " << gpu_keys_mib << " MiB\n";
-        std::cout << "  Sort  : " << gpu_sort_mib << " MiB\n";
-        std::cout << "  Peak  : " << gpu_peak_mib << " MiB\n";
+        std::cout << "\nVRAM (above context baseline):\n";
+        std::cout << "  Keys : " << gpu_keys_mib << " MiB\n";
+        std::cout << "  Sort : " << gpu_sort_mib << " MiB\n";
+        std::cout << "  Peak : " << gpu_peak_mib << " MiB\n";
     }
 
     return EXIT_SUCCESS;
