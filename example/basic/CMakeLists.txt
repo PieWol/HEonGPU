@@ -25,6 +25,7 @@ set(EXECUTABLES
     18_ckks_sorting 18_ckks_sorting.cpp
     19_ckks_minimum 19_ckks_minimum.cpp
     20_ckks_median  20_ckks_median.cpp
+    21_ckks_ranking_multi 21_ckks_ranking_multi.cpp
 )
 
 function(add_example exe source)
