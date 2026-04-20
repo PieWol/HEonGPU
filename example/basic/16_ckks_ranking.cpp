@@ -70,12 +70,14 @@ class CKKSPolyEvaluator : public heongpu::HEArithmeticOperator<Scheme>
 heongpu::Ciphertext<Scheme> replicateRow(
     const heongpu::Ciphertext<Scheme>& row_initial, int vec_len,
     heongpu::Galoiskey<Scheme>& galois_key,
-    CKKSPolyEvaluator& evaluator);
+    CKKSPolyEvaluator& evaluator,
+    heongpu::HEContext<Scheme>& context);
 
 heongpu::Ciphertext<Scheme> replicateColumn(
     const heongpu::Ciphertext<Scheme>& col_initial, int vec_len,
     heongpu::Galoiskey<Scheme>& galois_key,
-    CKKSPolyEvaluator& evaluator);
+    CKKSPolyEvaluator& evaluator,
+    heongpu::HEContext<Scheme>& context);
 
 /**
  * @brief TransR: transpose a row vector to a column vector.
@@ -135,7 +137,8 @@ chebyshev_sign_approx(heongpu::Ciphertext<Scheme>& ct_diff,
 heongpu::Ciphertext<Scheme>
 sumRows(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
         heongpu::Galoiskey<Scheme>& sumr_galois_key,
-        CKKSPolyEvaluator& evaluator);
+        CKKSPolyEvaluator& evaluator,
+        heongpu::HEContext<Scheme>& context);
 
 /**
  * @brief Normalize a plaintext vector to [0,1] before encryption.
@@ -293,7 +296,7 @@ std::vector<int> transposeGaloisShifts(int vec_len)
 int main(int argc, char* argv[])
 {
     // ----- Parse command line -----
-    // Usage: 16_ckks_rotation_parallel [N] [--bench]
+    // Usage: 16_ckks_ranking [N] [--bench]
     //   N       : vector length, must be power of 2 (default: 64)
     //   --bench : suppress verbose output, emit single BENCH: line for scripts
     int vec_len   = 64;
@@ -581,7 +584,8 @@ int main(int argc, char* argv[])
 heongpu::Ciphertext<Scheme>
 replicateRow(const heongpu::Ciphertext<Scheme>& row_initial, int vec_len,
              heongpu::Galoiskey<Scheme>& galois_key,
-             CKKSPolyEvaluator& evaluator)
+             CKKSPolyEvaluator& evaluator,
+             heongpu::HEContext<Scheme>& context)
 {
     heongpu::Ciphertext<Scheme> row_replicated = row_initial;
 
@@ -592,8 +596,8 @@ replicateRow(const heongpu::Ciphertext<Scheme>& row_initial, int vec_len,
         int shift = -(i * vec_len);
         if (g_verbose)
             std::cout << shift << " ";
-        heongpu::Ciphertext<Scheme> rotated = row_replicated;
-        evaluator.rotate_rows_inplace(rotated, galois_key, shift);
+        heongpu::Ciphertext<Scheme> rotated(context);
+        evaluator.rotate_rows(row_replicated, rotated, galois_key, shift);
         evaluator.add_inplace(row_replicated, rotated);
     }
     if (g_verbose)
@@ -608,7 +612,8 @@ replicateRow(const heongpu::Ciphertext<Scheme>& row_initial, int vec_len,
 heongpu::Ciphertext<Scheme>
 replicateColumn(const heongpu::Ciphertext<Scheme>& col_initial, int vec_len,
                 heongpu::Galoiskey<Scheme>& galois_key,
-                CKKSPolyEvaluator& evaluator)
+                CKKSPolyEvaluator& evaluator,
+                heongpu::HEContext<Scheme>& context)
 {
     heongpu::Ciphertext<Scheme> col_replicated = col_initial;
 
@@ -619,8 +624,8 @@ replicateColumn(const heongpu::Ciphertext<Scheme>& col_initial, int vec_len,
         int shift = -i;
         if (g_verbose)
             std::cout << shift << " ";
-        heongpu::Ciphertext<Scheme> rotated = col_replicated;
-        evaluator.rotate_rows_inplace(rotated, galois_key, shift);
+        heongpu::Ciphertext<Scheme> rotated(context);
+        evaluator.rotate_rows(col_replicated, rotated, galois_key, shift);
         evaluator.add_inplace(col_replicated, rotated);
     }
     if (g_verbose)
@@ -660,8 +665,8 @@ transposeRowToColumn(const heongpu::Ciphertext<Scheme>& row_vector,
         int shift = -((N * (N - 1)) / (1 << i));
         if (g_verbose)
             std::cout << shift << " ";
-        heongpu::Ciphertext<Scheme> rotated = result;
-        evaluator.rotate_rows_inplace(rotated, galois_key, shift);
+        heongpu::Ciphertext<Scheme> rotated(context);
+        evaluator.rotate_rows(result, rotated, galois_key, shift);
         evaluator.add_inplace(result, rotated);
     }
     if (g_verbose)
@@ -729,7 +734,8 @@ chebyshev_sign_approx(heongpu::Ciphertext<Scheme>& ct_diff,
 heongpu::Ciphertext<Scheme>
 sumRows(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
         heongpu::Galoiskey<Scheme>& sumr_galois_key,
-        CKKSPolyEvaluator& evaluator)
+        CKKSPolyEvaluator& evaluator,
+        heongpu::HEContext<Scheme>& context)
 {
     heongpu::Ciphertext<Scheme> result = ct_matrix;
 
@@ -742,8 +748,8 @@ sumRows(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
         int shift = vec_len * (1 << i); // N, 2N, 4N, ...
         if (g_verbose)
             std::cout << shift << " ";
-        heongpu::Ciphertext<Scheme> rotated = result;
-        evaluator.rotate_rows_inplace(rotated, sumr_galois_key, shift);
+        heongpu::Ciphertext<Scheme> rotated(context);
+        evaluator.rotate_rows(result, rotated, sumr_galois_key, shift);
         evaluator.add_inplace(result, rotated);
     }
 
@@ -805,7 +811,7 @@ basicRank(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
 
     // Step 1: row replication — position (k,j) = v[j]
     heongpu::Ciphertext<Scheme> ct_row =
-        replicateRow(ct_vector, vec_len, row_galois_key, evaluator);
+        replicateRow(ct_vector, vec_len, row_galois_key, evaluator, context);
 
     // Step 2: TransR then ReplC — position (k,j) = v[k]
     if (g_verbose)
@@ -814,7 +820,7 @@ basicRank(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
         transposeRowToColumn(ct_vector, vec_len, transpose_galois_key,
                              evaluator, encoder, context, scale);
     heongpu::Ciphertext<Scheme> ct_col =
-        replicateColumn(ct_col_transposed, vec_len, col_galois_key, evaluator);
+        replicateColumn(ct_col_transposed, vec_len, col_galois_key, evaluator, context);
 
     // Align ct_row depth to match ct_col (TransR rescaled: depth 0→1)
     evaluator.mod_drop_inplace(ct_row);
@@ -844,7 +850,7 @@ basicRank(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
     if (g_verbose)
         std::cout << "Step 6: SumR (row-folding)...\n";
     heongpu::Ciphertext<Scheme> ct_sumr =
-        sumRows(ct_sign, vec_len, sumr_galois_key, evaluator);
+        sumRows(ct_sign, vec_len, sumr_galois_key, evaluator, context);
 
     // Step 7: ÷2 via scalar multiply_plain (double overload — no depth check).
     // multiply_plain(ct, 0.5, scale) multiplies plaintext values by 0.5 and
