@@ -144,7 +144,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--binary", type=Path, default=BINARY_DEFAULT,
-        help="Path to 16_ckks_rotation_parallel binary"
+        help="Path to 16_ckks_ranking binary"
     )
     parser.add_argument(
         "--n-values", type=int, nargs="+", default=N_VALUES_DEFAULT,
@@ -165,7 +165,7 @@ def main() -> None:
     # Validate binary exists
     if not args.binary.exists():
         print(f"Binary not found: {args.binary}")
-        print("Build first with: cmake --build build --target 16_ckks_rotation_parallel")
+        print("Build first with: cmake --build build --target 16_ckks_ranking")
         sys.exit(1)
 
     # Validate N values
