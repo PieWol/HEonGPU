@@ -42,18 +42,23 @@
  * No factor-of-2 correction is needed (indicator returns values in [0,1]).
  *
  * Depth budget (n=65536, 32 Q primes → 31 usable levels):
- *   Each degree-7 evaluate_poly(lead=true) costs 4 levels (not 3): the
- *   Chebyshev T_3 basis element sits 2 levels below the input, forcing the
- *   polynomial-basis evaluation down 1 extra level; lead=true ensures the
- *   outer rescale fires so the output has rescale_required_=false.
+ *   Each degree-7 evaluate_poly(lead=true) costs 4 levels.
+ *   Reduced fg params: dg_c=2, df_c=1, dg_i=2, df_i=1 (fit in n=65536).
+ *   Paper's params (dg_c=3, df_c=2, dg_i=adaptive, df_i=2) require n=131072
+ *   and exceed 16 GB VRAM — see docs/vram_analysis.md.
+ *   Bumping dg_c to 3 was tested (fits by 1 bit at Q+P=1760) but consumed
+ *   all spare levels, worsening N=16 precision without fixing N=32.
  *   1  : TransR (multiply_plain mask + rescale)
- *   12 : compareAdv (DG_C+DF_C=3 evals × 4 levels)
- *   1  : MaskRow0 (multiply_plain + rescale)
+ *   (dg_c+df_c)*4 : compareAdv = 12
+ *   1  : MaskRow0 (ct×ct multiply + rescale; SumR butterfly only gives the
+ *         full sum in row 0 because slots beyond N×N are zero, preventing
+ *         proper wrap-around in the butterfly)
+ *   0  : ReplR after mask (no depth)
  *   1  : indicatorAdv normalize (×1/N + rescale)
- *   12 : indicatorAdv signAdv × 2 parallel (DG_I+DF_I=3 evals × 4 levels)
+ *   (dg_i+df_i)*4 : indicatorAdv signAdv × 2 = 12
  *   1  : indicatorAdv multiply s1·(1−s2) + rescale
  *   1  : multiply(M, VR) + rescale
- *   Total: 29 ≤ 31 ✓  (2 spare levels)
+ *   depth = 4*(dg_c+df_c+dg_i+df_i) + 5 = 29 ≤ 31 ✓  (2 spare levels)
  *
  * Usage:  18_ckks_sorting [N] [--bench]
  *   N       : vector length, power of 2, default 8
@@ -73,32 +78,9 @@
 static bool g_verbose = true;
 constexpr auto Scheme = heongpu::Scheme::CKKS;
 
-// fg-sign composition parameters.
-//
-// Each degree-7 Chebyshev evaluate_poly call (with lead=true) costs 4 levels:
-//   - BSGS for degree-7 needs T_3 which is 2 levels below input (Chebyshev
-//     sub-recursion), forcing the polynomial-basis result down 1 level from the
-//     target, then the conditional internal rescale drops 1 more.
-//   - The final scalar rescale inside evaluate_poly fires because lead=true
-//     makes the scale ≈ 2^80 after the giant-step multiply, so scale/qi ≥ Δ/2.
-//   - Output: rescale_required_=false, level drops by 4.  (lead=false only
-//     drops 3 levels but leaves rescale_required_=true, breaking chaining.)
-//
-// signAdv(dg, df) = (dg + df) calls × 4 levels each.
-//
-// Depth budget (n=65536, 32 Q primes → 31 usable levels):
-//   1  : TransR
-//   12 : compareAdv  (DG_C+DF_C=3 calls × 4 levels)
-//   1  : MaskRow0 (plain multiply + rescale)
-//   1  : indicatorAdv normalize
-//   12 : indicatorAdv signAdv × 2 (each DG_I+DF_I=3 × 4, but run in parallel)
-//   1  : indicatorAdv s1×(1-s2) multiply + rescale
-//   1  : phase-3 M×VR multiply + rescale
-//   Total: 29 ≤ 31 ✓  (2 spare levels)
-constexpr int DG_C = 2; // g-compositions for compare
-constexpr int DF_C = 1; // f-compositions for compare
-constexpr int DG_I = 2; // g-compositions for indicator
-constexpr int DF_I = 1; // f-compositions for indicator
+// fg-sign composition parameters (paper's spec, computed at runtime in main):
+//   dg_c=3, df_c=2 (compare), dg_i=(log2(N)+1)/2, df_i=2 (indicator).
+// Each degree-7 evaluate_poly(lead=true) costs 4 levels.
 
 // ---------------------------------------------------------------------------
 // CKKSPolyEvaluator — exposes protected evaluate_poly
@@ -298,15 +280,16 @@ signAdv(heongpu::Ciphertext<Scheme> ct, int dg, int df,
 static heongpu::Ciphertext<Scheme>
 compareAdv(const heongpu::Ciphertext<Scheme>& a,
            const heongpu::Ciphertext<Scheme>& b,
+           int dg_c, int df_c,
            CKKSPolyEvaluator& pe, heongpu::Relinkey<Scheme>& rk,
            heongpu::HEContext<Scheme>& ctx, double scale)
 {
-    if (g_verbose) std::cout << "  compareAdv (DG_C=" << DG_C << " DF_C=" << DF_C << ")\n";
+    if (g_verbose) std::cout << "  compareAdv (dg_c=" << dg_c << " df_c=" << df_c << ")\n";
     heongpu::Ciphertext<Scheme> a_copy = a;
     heongpu::Ciphertext<Scheme> b_copy = b;
     heongpu::Ciphertext<Scheme> diff(ctx);
     pe.sub(a_copy, b_copy, diff);
-    return signAdv(diff, DG_C, DF_C, pe, rk, scale);
+    return signAdv(diff, dg_c, df_c, pe, rk, scale);
 }
 
 /**
@@ -326,12 +309,13 @@ compareAdv(const heongpu::Ciphertext<Scheme>& a,
  */
 static heongpu::Ciphertext<Scheme>
 indicatorAdv(heongpu::Ciphertext<Scheme>& ct, int N,
+             int dg_i, int df_i,
              CKKSPolyEvaluator& pe, heongpu::Relinkey<Scheme>& rk,
              heongpu::HEContext<Scheme>& ctx, double scale)
 {
     if (g_verbose)
         std::cout << "  indicatorAdv N=" << N
-                  << " (DG_I=" << DG_I << " DF_I=" << DF_I << ")\n";
+                  << " (dg_i=" << dg_i << " df_i=" << df_i << ")\n";
 
     double inv_N      = 1.0 / N;
     double half_inv_N = 0.5 / N;
@@ -348,8 +332,8 @@ indicatorAdv(heongpu::Ciphertext<Scheme>& ct, int N,
     pe.add_plain_inplace(c2, -half_inv_N);
 
     // Two independent sign evaluations (same starting level)
-    heongpu::Ciphertext<Scheme> s1 = signAdv(c1, DG_I, DF_I, pe, rk, scale);
-    heongpu::Ciphertext<Scheme> s2 = signAdv(c2, DG_I, DF_I, pe, rk, scale);
+    heongpu::Ciphertext<Scheme> s1 = signAdv(c1, dg_i, df_i, pe, rk, scale);
+    heongpu::Ciphertext<Scheme> s2 = signAdv(c2, dg_i, df_i, pe, rk, scale);
 
     // Build (1 − s2): negate is free, add_plain is free
     pe.negate_inplace(s2);
@@ -505,6 +489,7 @@ static void debugMatrix(const char* label,
 // ---------------------------------------------------------------------------
 heongpu::Ciphertext<Scheme>
 homomorphicSortFG(const heongpu::Ciphertext<Scheme>& ct_vector, int N,
+                  int dg_c, int df_c, int dg_i, int df_i,
                   heongpu::Galoiskey<Scheme>& row_key,
                   heongpu::Galoiskey<Scheme>& col_key,
                   heongpu::Galoiskey<Scheme>& sumr_key,
@@ -542,18 +527,17 @@ homomorphicSortFG(const heongpu::Ciphertext<Scheme>& ct_vector, int N,
 
     // C[k,j] ≈ 1 if v[j] > v[k],  ≈ 0 if v[j] < v[k]
     if (g_verbose) std::cout << "Step 3: compareAdv(VR, VC)\n";
-    heongpu::Ciphertext<Scheme> C = compareAdv(VR, VC, pe, rk, ctx, scale);
+    heongpu::Ciphertext<Scheme> C = compareAdv(VR, VC, dg_c, df_c, pe, rk, ctx, scale);
 
-    // SumR: left-rotation butterfly sums all rows into row 0 (suffix sum).
-    // Row 0 gets the full sum; other rows get partial (suffix) sums.
+    // SumR butterfly: left-rotation folds all rows. Only row 0 gets the
+    // complete sum (other rows get partial sums because our N×N matrix
+    // doesn't fill the full slot ring — zero padding prevents wrap-around).
     if (g_verbose) std::cout << "Step 4a: SumR(C) -> full sum in row 0\n";
     heongpu::Ciphertext<Scheme> R = sumRows(C, N, sumr_key, pe);
 
-    // Mask row 0 to discard partial sums from rows 1..N-1.
-    // Costs 1 level (ct×ct multiply + rescale).
-    // HEonGPU multiply_plain requires plaintext.depth_ == ciphertext.depth_,
-    // but encoding always gives depth_=0.  Encrypting the mask and mod-dropping
-    // to R's level avoids the mismatch.
+    // MaskRow0: keep only row 0 (discard partial sums in rows 1..N-1).
+    // Uses encrypted mask + ct×ct multiply because multiply_plain requires
+    // depth alignment (encoder always sets depth=0, can't match ct depth).
     if (g_verbose) std::cout << "Step 4b: MaskRow0\n";
     {
         std::vector<double> row0_mask(slots, 0.0);
@@ -575,8 +559,7 @@ homomorphicSortFG(const heongpu::Ciphertext<Scheme>& ct_vector, int N,
         R = std::move(R_masked);
     }
 
-    // ReplR: right-rotation butterfly replicates row 0 to all N rows.
-    // After this, R[k,j] = rank_0(v[j]) + 0.5 for every row k. No depth cost.
+    // ReplR: copy row 0 to all rows. No depth cost.
     if (g_verbose) std::cout << "Step 4c: ReplR(R)\n";
     R = replicateRow(R, N, row_key, pe);
 
@@ -613,7 +596,7 @@ homomorphicSortFG(const heongpu::Ciphertext<Scheme>& ct_vector, int N,
     // M[k,j] ≈ 1 iff rank_0(v[j]) = k
     if (g_verbose) std::cout << "Step 5: indicatorAdv(R + subMask)\n";
     heongpu::Ciphertext<Scheme> M =
-        indicatorAdv(ct_diff, N, pe, rk, ctx, scale);
+        indicatorAdv(ct_diff, N, dg_i, df_i, pe, rk, ctx, scale);
 
     if (g_verbose)
         std::cout << "  M level=" << M.level() << "\n";
@@ -671,13 +654,29 @@ int main(int argc, char* argv[])
 
     cudaSetDevice(0);
 
+    // ── fg params ─────────────────────────────────────────────────────────
+    // Reduced from paper's (3,2,adaptive,2) to fit n=65536 / 16 GB VRAM.
+    // Paper's params require n=131072 → keys alone ~7.4 GB → OOM on 16 GB GPU.
+    // See docs/vram_analysis.md for the full analysis.
+    const int dg_c = 2;
+    const int df_c = 1;
+    const int dg_i = 2;
+    const int df_i = 1;
+    const int depth = 4 * (dg_c + df_c + dg_i + df_i) + 4; // = 28
+
+    if (g_verbose)
+        std::cout << "fg params: dg_c=" << dg_c << " df_c=" << df_c
+                  << " dg_i=" << dg_i << " df_i=" << df_i
+                  << "  depth=" << depth << "\n";
+
     // ── HE context ──────────────────────────────────────────────────────────
     // n=65536 → 32768 slots → max N=128 (128²=16384 ≤ 32768).
-    // 32 Q primes (1 special 60-bit + 31 computation 40-bit) → 31 usable levels.
-    // 7 P primes (60-bit) for hybrid keyswitching.
-    // Total Q bits = 60 + 31×40 = 1300; P bits = 420; Q+P = 1720 < 128-bit limit ✓
-    heongpu::HEContext<Scheme> ctx = heongpu::GenHEContext<Scheme>();
+    // 32 Q primes (1×60-bit + 31×40-bit) → 31 usable levels → 3 spare.
+    // 7 P primes (60-bit) for hybrid keyswitching, dnum=ceil(32/7)=5.
+    // Total Q+P bits = 60 + 31×40 + 7×60 = 1720 < 1761 (128-bit bound) ✓
     const size_t poly_modulus_degree = 65536;
+
+    heongpu::HEContext<Scheme> ctx = heongpu::GenHEContext<Scheme>();
     ctx->set_poly_modulus_degree(poly_modulus_degree);
     ctx->set_coeff_modulus_bit_sizes(
         {60, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40,
@@ -787,7 +786,7 @@ int main(int argc, char* argv[])
     sort_timer.startTimer();
 
     heongpu::Ciphertext<Scheme> ct_sorted =
-        homomorphicSortFG(ct, N,
+        homomorphicSortFG(ct, N, dg_c, df_c, dg_i, df_i,
                           row_key, col_key, sumr_key, transr_key, sumc_key,
                           rk, pe, enc, encryptor, decryptor, ctx, scale);
 
