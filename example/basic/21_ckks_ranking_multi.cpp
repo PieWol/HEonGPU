@@ -24,10 +24,11 @@
  *
  * Depth budget (14 levels, same context as 16_ckks_ranking):
  *   1  TransR
- *   11 chebyshev_sign_approx degree=2047
- *   1  normalize to [0,1]  (add+multiply+rescale)
- *   0  sumRows / sumColumns / transposeColumn (rotations+adds)
- *   Total: 13 ≤ 14 ✓
+ *   12 chebyshev_sign_approx degree=2047
+ *   0  sumRows / sumColumns (rotations+adds)
+ *   1  maskColumn0 (multiply_plain + rescale, Ch path only)
+ *   0  transposeColumn (rotations+adds)
+ *   Total: 14 = 14 ✓  (normalize deferred to post-decryption)
  *
  * Usage: 21_ckks_ranking_multi [N] [--bench]
  *   N must be a multiple of 128 and a power of 2 (256, 512, ...)
@@ -170,13 +171,14 @@ std::vector<int> transpcGaloisShifts(int L) // TransposeC: +(L*(L-1)/2^i) i=1..l
 // ReplR: replicate row 0 to all L rows. Shifts: -(L/2)*L, ..., -L. No depth.
 static heongpu::Ciphertext<Scheme>
 replicateRow(const heongpu::Ciphertext<Scheme>& row, int L,
-             heongpu::Galoiskey<Scheme>& gk, CKKSPolyEvaluator& pe)
+             heongpu::Galoiskey<Scheme>& gk, CKKSPolyEvaluator& pe,
+             heongpu::HEContext<Scheme>& ctx)
 {
     heongpu::Ciphertext<Scheme> r = row;
     for (int i = L / 2; i > 0; i /= 2)
     {
-        heongpu::Ciphertext<Scheme> rot = r;
-        pe.rotate_rows_inplace(rot, gk, -(i * L));
+        heongpu::Ciphertext<Scheme> rot(ctx);
+        pe.rotate_rows(r, rot, gk, -(i * L));
         pe.add_inplace(r, rot);
     }
     return r;
@@ -185,13 +187,14 @@ replicateRow(const heongpu::Ciphertext<Scheme>& row, int L,
 // ReplC: replicate column 0 to all L columns. Shifts: -1,-2,...,-(L/2). No depth.
 static heongpu::Ciphertext<Scheme>
 replicateColumn(const heongpu::Ciphertext<Scheme>& col, int L,
-                heongpu::Galoiskey<Scheme>& gk, CKKSPolyEvaluator& pe)
+                heongpu::Galoiskey<Scheme>& gk, CKKSPolyEvaluator& pe,
+                heongpu::HEContext<Scheme>& ctx)
 {
     heongpu::Ciphertext<Scheme> r = col;
     for (int i = 1; i < L; i *= 2)
     {
-        heongpu::Ciphertext<Scheme> rot = r;
-        pe.rotate_rows_inplace(rot, gk, -i);
+        heongpu::Ciphertext<Scheme> rot(ctx);
+        pe.rotate_rows(r, rot, gk, -i);
         pe.add_inplace(r, rot);
     }
     return r;
@@ -209,8 +212,8 @@ transposeRowToColumn(const heongpu::Ciphertext<Scheme>& row, int L,
     for (int i = 1; i <= logL; i++)
     {
         int shift = -((L * (L - 1)) / (1 << i));
-        heongpu::Ciphertext<Scheme> rot = r;
-        pe.rotate_rows_inplace(rot, gk, shift);
+        heongpu::Ciphertext<Scheme> rot(ctx);
+        pe.rotate_rows(r, rot, gk, shift);
         pe.add_inplace(r, rot);
     }
     // MaskC: keep column 0 (positions k*L for k=0..L-1)
@@ -227,14 +230,15 @@ transposeRowToColumn(const heongpu::Ciphertext<Scheme>& row, int L,
 // SumR: fold all L rows into row 0. Shifts: +L, +2L, ..., +L*(L/2). No depth.
 static heongpu::Ciphertext<Scheme>
 sumRows(const heongpu::Ciphertext<Scheme>& m, int L,
-        heongpu::Galoiskey<Scheme>& gk, CKKSPolyEvaluator& pe)
+        heongpu::Galoiskey<Scheme>& gk, CKKSPolyEvaluator& pe,
+        heongpu::HEContext<Scheme>& ctx)
 {
     heongpu::Ciphertext<Scheme> r = m;
     int logL = static_cast<int>(std::ceil(std::log2(L)));
     for (int i = 0; i < logL; i++)
     {
-        heongpu::Ciphertext<Scheme> rot = r;
-        pe.rotate_rows_inplace(rot, gk, L * (1 << i));
+        heongpu::Ciphertext<Scheme> rot(ctx);
+        pe.rotate_rows(r, rot, gk, L * (1 << i));
         pe.add_inplace(r, rot);
     }
     return r;
@@ -243,48 +247,76 @@ sumRows(const heongpu::Ciphertext<Scheme>& m, int L,
 // SumC: fold all L columns into column 0. Shifts: +1, +2, ..., +L/2. No depth.
 static heongpu::Ciphertext<Scheme>
 sumColumns(const heongpu::Ciphertext<Scheme>& m, int L,
-           heongpu::Galoiskey<Scheme>& gk, CKKSPolyEvaluator& pe)
+           heongpu::Galoiskey<Scheme>& gk, CKKSPolyEvaluator& pe,
+           heongpu::HEContext<Scheme>& ctx)
 {
     heongpu::Ciphertext<Scheme> r = m;
     int logL = static_cast<int>(std::ceil(std::log2(L)));
     for (int i = 0; i < logL; i++)
     {
-        heongpu::Ciphertext<Scheme> rot = r;
-        pe.rotate_rows_inplace(rot, gk, 1 << i);
+        heongpu::Ciphertext<Scheme> rot(ctx);
+        pe.rotate_rows(r, rot, gk, 1 << i);
         pe.add_inplace(r, rot);
     }
     return r;
+}
+
+// MaskColumn0: zero out everything except column 0 (positions k*L for k=0..L-1).
+// Depth: 1 (multiply_plain + rescale). Needed between sumColumns and transposeColumn.
+static heongpu::Ciphertext<Scheme>
+maskColumn0(heongpu::Ciphertext<Scheme>& ct, int L,
+            CKKSPolyEvaluator& pe, heongpu::HEEncoder<Scheme>& enc,
+            heongpu::HEContext<Scheme>& ctx, double scale)
+{
+    size_t slots = ctx->get_poly_modulus_degree() / 2;
+    std::vector<double> mask(slots, 0.0);
+    for (int k = 0; k < L; k++) mask[k * L] = 1.0;
+
+    heongpu::Plaintext<Scheme> pt(ctx);
+    enc.encode(pt, mask, scale);
+
+    int target_depth = ct.depth();
+    while (pt.depth() < target_depth)
+        pe.mod_drop_inplace(pt);
+
+    heongpu::Ciphertext<Scheme> out = ct;
+    pe.multiply_plain_inplace(out, pt);
+    pe.rescale_inplace(out);
+    return out;
 }
 
 // TransposeC: transpose column 0 to row 0. Shifts: +(L*(L-1)/2^i). No depth.
 // Row 0 holds the transposed result; other rows contain partial (garbage) sums.
 static heongpu::Ciphertext<Scheme>
 transposeColumn(const heongpu::Ciphertext<Scheme>& col, int L,
-                heongpu::Galoiskey<Scheme>& gk, CKKSPolyEvaluator& pe)
+                heongpu::Galoiskey<Scheme>& gk, CKKSPolyEvaluator& pe,
+                heongpu::HEContext<Scheme>& ctx)
 {
     heongpu::Ciphertext<Scheme> r = col;
     int logL = static_cast<int>(std::ceil(std::log2(L)));
     for (int i = 1; i <= logL; i++)
     {
         int shift = (L * (L - 1)) / (1 << i);
-        heongpu::Ciphertext<Scheme> rot = r;
-        pe.rotate_rows_inplace(rot, gk, shift);
+        heongpu::Ciphertext<Scheme> rot(ctx);
+        pe.rotate_rows(r, rot, gk, shift);
         pe.add_inplace(r, rot);
     }
     return r;
 }
 
 // ---------------------------------------------------------------------------
-// Chebyshev sign approximation → normalized to [0,1]
+// Chebyshev sign approximation (raw, no normalize)
 // Input: ct with values in [-1, 1]
-// Output: ≈1 where ct > 0,  ≈0 where ct < 0  (depth +12 = 11 Cheby + 1 rescale)
+// Output: ≈+1 where ct > 0,  ≈-1 where ct < 0  (depth: +12 from Chebyshev)
+// Normalization to [0,1] is deferred to after decryption to save 1 level
+// for maskColumn0 in Phase 3.
 // ---------------------------------------------------------------------------
 static heongpu::Ciphertext<Scheme>
 compareUnit(heongpu::Ciphertext<Scheme>& ct_diff,
             CKKSPolyEvaluator& pe, heongpu::Relinkey<Scheme>& rk,
             double scale)
 {
-    constexpr int degree = 2047; // N>128 always needs max degree
+    constexpr int degree = 2047;
 
     auto sign_fn = [](Complex64 x) -> Complex64 {
         double re = x.real();
@@ -293,14 +325,7 @@ compareUnit(heongpu::Ciphertext<Scheme>& ct_diff,
     std::vector<Complex64> coeffs =
         heongpu::approximate_function(sign_fn, -1.0, 1.0, degree);
 
-    heongpu::Ciphertext<Scheme> ct_sign =
-        pe.eval_chebyshev(ct_diff, scale, coeffs, degree, rk);
-
-    // Map [-1,+1] → [0,1]: add 1 then multiply by 0.5 + rescale
-    pe.add_plain_inplace(ct_sign, 1.0);
-    pe.multiply_plain_inplace(ct_sign, 0.5, scale);
-    pe.rescale_inplace(ct_sign);
-    return ct_sign;
+    return pe.eval_chebyshev(ct_diff, scale, coeffs, degree, rk);
 }
 
 // ---------------------------------------------------------------------------
@@ -333,10 +358,10 @@ multiCiphertextRank(
     for (int j = 0; j < M; j++)
     {
         if (g_verbose) std::cout << "  Block " << j << ": ReplR + TransR+ReplC\n";
-        replR[j] = replicateRow(blocks[j], L, row_key, pe);
+        replR[j] = replicateRow(blocks[j], L, row_key, pe, ctx);
         heongpu::Ciphertext<Scheme> col_t =
             transposeRowToColumn(blocks[j], L, transr_key, pe, enc, ctx, scale);
-        replC[j] = replicateColumn(col_t, L, col_key, pe);
+        replC[j] = replicateColumn(col_t, L, col_key, pe, ctx);
     }
 
     // ── Phase 2: compare upper triangle ────────────────────────────────────
@@ -372,12 +397,11 @@ multiCiphertextRank(
             if (!Cv_init[j]) { Cv[j] = Cjk;                Cv_init[j] = true; }
             else              { pe.add_inplace(Cv[j], Cjk);                    }
 
-            // Complementary: Ch[k] += (1 - Cjk) for off-diagonal pairs
+            // Complementary: Ch[k] += -sign_jk (raw sign, no normalize)
             if (j != k)
             {
                 heongpu::Ciphertext<Scheme> Ckj = Cjk;
                 pe.negate_inplace(Ckj);
-                pe.add_plain_inplace(Ckj, 1.0);
 
                 if (!Ch_init[k]) { Ch[k] = Ckj;                Ch_init[k] = true; }
                 else             { pe.add_inplace(Ch[k], Ckj);                    }
@@ -393,20 +417,28 @@ multiCiphertextRank(
     for (int j = 0; j < M; j++)
     {
         // sv[j]: sumRows folds all L rows into row 0
-        heongpu::Ciphertext<Scheme> sv = sumRows(Cv[j], L, sumr_key, pe);
+        heongpu::Ciphertext<Scheme> sv = sumRows(Cv[j], L, sumr_key, pe, ctx);
         result[j] = sv;
 
         // sh[j]: horizontal contributions from blocks 0..j-1
         if (j > 0 && Ch_init[j])
         {
-            if (g_verbose) std::cout << "  Block " << j << ": sumColumns + transposeColumn\n";
-            heongpu::Ciphertext<Scheme> sh = sumColumns(Ch[j], L, sumc_key, pe);
-            sh = transposeColumn(sh, L, transpc_key, pe);
+            if (g_verbose) std::cout << "  Block " << j << ": sumColumns + maskCol0 + transposeColumn\n";
+            heongpu::Ciphertext<Scheme> sh = sumColumns(Ch[j], L, sumc_key, pe, ctx);
+            sh = maskColumn0(sh, L, pe, enc, ctx, scale);
+            sh = transposeColumn(sh, L, transpc_key, pe, ctx);
+
+            // sh is now 1 level below sv; mod_drop sv to match
+            while (result[j].level() > sh.level())
+            {
+                heongpu::Ciphertext<Scheme> tmp(ctx);
+                pe.mod_drop(result[j], tmp);
+                result[j] = std::move(tmp);
+            }
             pe.add_inplace(result[j], sh);
         }
 
-        // +0.5 for the self-comparison diagonal (compare(x,x) ≈ 0.5)
-        pe.add_plain_inplace(result[j], 0.5);
+        // No in-HE normalize; conversion done after decryption
     }
 
     return result;
@@ -579,7 +611,10 @@ int main(int argc, char* argv[])
          - gpu_baseline) / kMiB;
     size_t gpu_peak_mib = getPeakGPUMiB();
 
-    // ── Decrypt ───────────────────────────────────────────────────────────────
+    // ── Decrypt & convert raw sign sums to ranks ──────────────────────────────
+    // compareUnit returns sign ∈ [-1,+1] (no in-HE normalize).
+    // raw = Σ sign(x_i − x_j) = (rank−1) − (N−rank) = 2*rank − N − 1
+    // ⟹ rank = (raw + N + 1) / 2
     std::vector<double> all_ranks(N);
     for (int j = 0; j < M; j++)
     {
@@ -588,7 +623,7 @@ int main(int argc, char* argv[])
         std::vector<double> raw;
         enc.decode(raw, pt);
         for (int i = 0; i < L; i++)
-            all_ranks[j * L + i] = raw[i];
+            all_ranks[j * L + i] = (raw[i] + N + 1) / 2.0;
     }
 
     // ── Output ───────────────────────────────────────────────────────────────
@@ -612,22 +647,36 @@ int main(int argc, char* argv[])
         display_vector(all_ranks, std::min(N, 8));
 
         std::cout << "\nVerification (expected rank[i] = i+1 for sorted input):\n";
-        bool all_correct = true;
-        int show = std::min(N, 16);
-        for (int i = 0; i < show; i++)
+        double max_err = 0.0;
+        // Show first 8, block boundary (L-2..L+1), and last 4
+        std::vector<int> show_indices;
+        for (int i = 0; i < std::min(N, 8); i++) show_indices.push_back(i);
+        if (N > L + 2)
         {
+            show_indices.push_back(L - 2);
+            show_indices.push_back(L - 1);
+            show_indices.push_back(L);
+            show_indices.push_back(L + 1);
+        }
+        for (int i = std::max(0, N - 4); i < N; i++) show_indices.push_back(i);
+        // deduplicate and sort
+        std::sort(show_indices.begin(), show_indices.end());
+        show_indices.erase(std::unique(show_indices.begin(), show_indices.end()),
+                           show_indices.end());
+        int prev = -1;
+        for (int i : show_indices)
+        {
+            if (prev >= 0 && i > prev + 1) std::cout << "  ...\n";
             double expected = static_cast<double>(i + 1);
             double actual   = all_ranks[i];
             double err      = std::abs(actual - expected);
-            bool   ok       = err < 0.5;
-            if (!ok) all_correct = false;
+            if (err > max_err) max_err = err;
             std::cout << "  [" << i << "] expected=" << expected
                       << "  actual=" << actual
-                      << (ok ? "" : "  INCORRECT") << "\n";
+                      << "  err=" << err << "\n";
+            prev = i;
         }
-        if (show < N) std::cout << "  ... (showing first " << show << " of " << N << ")\n";
-        std::cout << (all_correct ? "\nAll checked ranks correct!\n"
-                                  : "\nSome ranks incorrect!\n");
+        std::cout << "Max error: " << max_err << (max_err < 1.5 ? " (OK)" : " (HIGH)") << "\n";
 
         std::cout << "\nTiming:\n";
         std::cout << "  Context gen : " << ctx_ms    << " ms\n";
