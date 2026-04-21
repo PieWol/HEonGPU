@@ -11,7 +11,7 @@
 // --------------------- //
 
 // Range of the polynomial degree
-#define MAX_POLY_DEGREE 65536 // 2^16 for now!
+#define MAX_POLY_DEGREE 131072 // 2^17 (needed for sorting with paper's fg params)
 #define MIN_POLY_DEGREE 4096 // 2^12
 
 // Range of the bit-length of all user-defined modulus

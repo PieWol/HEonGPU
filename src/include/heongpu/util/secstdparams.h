@@ -36,6 +36,8 @@ namespace heongpu
                 return 881;
             case 65536:
                 return 1761;
+            case 131072:
+                return 3500;
         }
         return 0;
     }
@@ -55,6 +57,8 @@ namespace heongpu
                 return 605;
             case 65536:
                 return 1212;
+            case 131072:
+                return 2400;
         }
         return 0;
     }
@@ -74,6 +78,8 @@ namespace heongpu
                 return 465;
             case 65536:
                 return 930;
+            case 131072:
+                return 1860;
         }
         return 0;
     }
