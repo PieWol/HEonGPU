@@ -3,32 +3,34 @@
  *
  * Multi-ciphertext homomorphic ranking for N > 128, following:
  *   "Efficient Ranking, Order Statistics, and Sorting under CKKS"
- *   Mazzone et al., USENIX Security 2025  (rankFG, complOpt=true)
+ *   Mazzone et al., USENIX Security 2025  (Algorithm 7, complOpt=true)
  *
- * Layout: subVectorLength L=128. Each ciphertext holds L×L=16384 slots.
+ * Layout: subVectorLength L=128. Each ciphertext holds L×L slots.
  * numCiphertext M = N/L. N must be a multiple of 128 and a power of 2.
+ *
+ * Comparison method (paper §6.1):
+ *   N ≤ 256 (M ≤ 2): Chebyshev degree 2047, n=32768, scale=2^45
+ *   N > 256 (M > 2):  f,g composition (dg=3, df=2), n=65536, scale=2^45
  *
  * Algorithm (complementary optimization):
  *   Phase 1: for each block j, compute replR[j] and replC[j]
  *   Phase 2: upper-triangle pairs (j,k), j≤k:
- *     Cjk = compare(replR[j], replC[k])  ∈ [0,1]
+ *     Cjk = sign(replR[j] − replC[k])  ∈ [-1,+1]
  *     Cv[j] += Cjk
- *     if j≠k: Ch[k] += (1 − Cjk)
+ *     if j≠k: Ch[k] += −Cjk
  *   Phase 3:
  *     sv[j] = sumRows(Cv[j])
- *     sh[j] = transposeColumn(sumColumns(Ch[j]))  for j>0
- *     s[j]  = sv[j] + sh[j] + 0.5
+ *     sh[j] = transposeColumn(maskColumn0(sumColumns(Ch[j])))  for j>0
+ *     result[j] = sv[j] + sh[j]
+ *   Post-decryption: rank = (raw + N + 1) / 2
  *
- * Output: s[j] row-0, positions 0..L-1 hold fractional ranks for
- *         input elements j*L..(j+1)*L-1.
+ * Depth budget (Chebyshev path, n=32768):
+ *   TransR(1) + mod_drop(1) + Cheby2047(12) + maskC(1) = 14
+ *   Q={60, 45×14}=15 primes, P={60×3}, total=870 < 881, dnum=5
  *
- * Depth budget (14 levels, same context as 16_ckks_ranking):
- *   1  TransR
- *   12 chebyshev_sign_approx degree=2047
- *   0  sumRows / sumColumns (rotations+adds)
- *   1  maskColumn0 (multiply_plain + rescale, Ch path only)
- *   0  transposeColumn (rotations+adds)
- *   Total: 14 = 14 ✓  (normalize deferred to post-decryption)
+ * Depth budget (f,g path, n=65536):
+ *   TransR(1) + mod_drop(1) + fg(4×5=20) + maskC(1) = 22
+ *   Q={60, 45×22}=23 primes, P={60×11}, total=1710 < 1761, dnum=3
  *
  * Usage: 21_ckks_ranking_multi [N] [--bench]
  *   N must be a multiple of 128 and a power of 2 (256, 512, ...)
@@ -46,7 +48,7 @@
 static bool g_verbose = true;
 constexpr auto Scheme = heongpu::Scheme::CKKS;
 
-// Fixed block size — 128² = 16384 slots fits in n=32768 (16384 slots)
+// Fixed block size — 128² = 16384 slots fits in both n=32768 and n=65536
 constexpr int SUB_VECTOR_LENGTH = 128;
 
 // ---------------------------------------------------------------------------
@@ -64,9 +66,10 @@ class CKKSPolyEvaluator : public heongpu::HEArithmeticOperator<Scheme>
     eval_chebyshev(heongpu::Ciphertext<Scheme>& ct, double target_scale,
                    const std::vector<Complex64>& coeffs, int degree,
                    heongpu::Relinkey<Scheme>& rk,
+                   bool lead = false,
                    double a = -1.0, double b = 1.0)
     {
-        Polynomial poly(degree, coeffs, /*lead=*/false,
+        Polynomial poly(degree, coeffs, lead,
                         heongpu::PolyType::CHEBYSHEV, a, b);
         return evaluate_poly(ct, target_scale, poly, rk,
                              heongpu::ExecutionOptions());
@@ -329,7 +332,51 @@ compareUnit(heongpu::Ciphertext<Scheme>& ct_diff,
 }
 
 // ---------------------------------------------------------------------------
-// Multi-ciphertext ranking (Algorithm 2 from paper, complementary opt.)
+// f,g sign composition (from Cheon et al., used for N > 256 per paper §6.1)
+// g(x) = (4589x − 16577x³ + 25614x⁵ − 12860x⁷)/1024
+// f(x) = (35x − 35x³ + 21x⁵ − 5x⁷)/16
+// sign(x) ≈ f^df(g^dg(x)), output ∈ [-1, +1]
+// ---------------------------------------------------------------------------
+static heongpu::Ciphertext<Scheme>
+applyG3(heongpu::Ciphertext<Scheme>& ct, CKKSPolyEvaluator& pe,
+        heongpu::Relinkey<Scheme>& rk, double scale)
+{
+    auto fn = [](Complex64 x) -> Complex64 {
+        double t = x.real(), t2 = t * t;
+        return {t * (4589.0 + t2 * (-16577.0 + t2 * (25614.0 - 12860.0 * t2)))
+                / 1024.0, 0.0};
+    };
+    auto coeffs = heongpu::approximate_function(fn, -1.0, 1.0, 7);
+    return pe.eval_chebyshev(ct, scale, coeffs, 7, rk, /*lead=*/true);
+}
+
+static heongpu::Ciphertext<Scheme>
+applyF3(heongpu::Ciphertext<Scheme>& ct, CKKSPolyEvaluator& pe,
+        heongpu::Relinkey<Scheme>& rk, double scale)
+{
+    auto fn = [](Complex64 x) -> Complex64 {
+        double t = x.real(), t2 = t * t;
+        return {t * (35.0 + t2 * (-35.0 + t2 * (21.0 - 5.0 * t2))) / 16.0, 0.0};
+    };
+    auto coeffs = heongpu::approximate_function(fn, -1.0, 1.0, 7);
+    return pe.eval_chebyshev(ct, scale, coeffs, 7, rk, /*lead=*/true);
+}
+
+static heongpu::Ciphertext<Scheme>
+compareFG(heongpu::Ciphertext<Scheme>& ct_diff, int dg, int df,
+          CKKSPolyEvaluator& pe, heongpu::Relinkey<Scheme>& rk,
+          double scale)
+{
+    heongpu::Ciphertext<Scheme> ct = ct_diff;
+    for (int i = 0; i < dg; i++)
+        ct = applyG3(ct, pe, rk, scale);
+    for (int i = 0; i < df; i++)
+        ct = applyF3(ct, pe, rk, scale);
+    return ct;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-ciphertext ranking (Algorithm 7 from paper, complementary opt.)
 // ---------------------------------------------------------------------------
 std::vector<heongpu::Ciphertext<Scheme>>
 multiCiphertextRank(
@@ -345,7 +392,8 @@ multiCiphertextRank(
     CKKSPolyEvaluator& pe,
     heongpu::HEEncoder<Scheme>& enc,
     heongpu::HEContext<Scheme>& ctx,
-    double scale)
+    double scale,
+    bool use_fg = false, int fg_dg = 3, int fg_df = 2)
 {
     const int M = static_cast<int>(blocks.size());
 
@@ -391,7 +439,9 @@ multiCiphertextRank(
             heongpu::Ciphertext<Scheme> diff(ctx);
             pe.sub(rj, replC[k], diff);
 
-            heongpu::Ciphertext<Scheme> Cjk = compareUnit(diff, pe, rk, scale);
+            heongpu::Ciphertext<Scheme> Cjk = use_fg
+                ? compareFG(diff, fg_dg, fg_df, pe, rk, scale)
+                : compareUnit(diff, pe, rk, scale);
 
             // Accumulate vertical: Cv[j] += Cjk
             if (!Cv_init[j]) { Cv[j] = Cjk;                Cv_init[j] = true; }
@@ -483,14 +533,46 @@ int main(int argc, char* argv[])
     cudaSetDevice(0);
 
     // ── HE context ──────────────────────────────────────────────────────────
-    // n=32768 → 16384 slots = 128² → 1 ciphertext per 128-element block
-    // Q={60, 40×14}, P={60×4} — same as 16_ckks_ranking
+    // Paper §6.1: Chebyshev degree 2^11 for N ≤ 256, f,g composition
+    // (dg=3, df=2) for N > 256. The f,g path needs more depth (4 levels per
+    // degree-7 application × 5 apps = 20 levels) which exceeds the n=32768
+    // security budget, requiring n=65536.
+    //
+    // N ≤ 256 (M ≤ 2): n=32768, Chebyshev 2047, scale=2^45
+    //   Depth: TransR(1) + mod_drop(1) + Cheby(12) + maskC(1) = 14 → Q=15
+    //   Q={60, 45×14}=690 bits, P={60×3}=180 bits, total=870 < 881, dnum=5
+    //
+    // N > 256 (M > 2): n=65536, f,g (dg=3, df=2), scale=2^45
+    //   Depth: TransR(1) + mod_drop(1) + fg(4×5=20) + maskC(1) = 22 → Q=23
+    //   Q={60, 45×22}=1050 bits, P={60×11}=660 bits, total=1710 < 1761, dnum=3
+    const bool use_fg = (M > 2);
+    const int fg_dg = 3, fg_df = 2;
+
+    size_t poly_modulus_degree;
+    int scale_bits;
+    std::vector<int> q_bits, p_bits;
+
+    if (!use_fg)
+    {
+        poly_modulus_degree = 32768;
+        scale_bits = 45;
+        q_bits = {60};
+        for (int i = 0; i < 14; i++) q_bits.push_back(45);
+        p_bits = {60, 60, 60};
+    }
+    else
+    {
+        poly_modulus_degree = 65536;
+        scale_bits = 45;
+        q_bits = {60};
+        for (int i = 0; i < 22; i++) q_bits.push_back(45);
+        p_bits.assign(11, 60);
+    }
+    double scale = std::pow(2.0, scale_bits);
+
     heongpu::HEContext<Scheme> ctx = heongpu::GenHEContext<Scheme>();
-    ctx->set_poly_modulus_degree(32768);
-    ctx->set_coeff_modulus_bit_sizes(
-        {60, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40},
-        {60, 60, 60, 60});
-    double scale = std::pow(2.0, 40);
+    ctx->set_poly_modulus_degree(poly_modulus_degree);
+    ctx->set_coeff_modulus_bit_sizes(q_bits, p_bits);
 
     GPUTimer ctx_timer;
     ctx_timer.startTimer();
@@ -498,8 +580,13 @@ int main(int argc, char* argv[])
     float ctx_ms = ctx_timer.stopTimer();
 
     if (g_verbose)
+    {
         std::cout << "N=" << N << "  M=" << M << " ciphertexts"
                   << "  subVectorLength=" << SUB_VECTOR_LENGTH << "\n";
+        std::cout << "Compare method: " << (use_fg ? "f,g (dg=3, df=2)" : "Chebyshev 2047")
+                  << "  n=" << poly_modulus_degree
+                  << "  scale=2^" << scale_bits << "\n";
+    }
 
     // ── Key generation ───────────────────────────────────────────────────────
     heongpu::HEKeyGenerator<Scheme> keygen(ctx);
@@ -579,7 +666,7 @@ int main(int argc, char* argv[])
     }
 
     // Split normalized input into M blocks of L elements each
-    const int slots = static_cast<int>(ctx->get_poly_modulus_degree() / 2); // 16384
+    const int slots = static_cast<int>(ctx->get_poly_modulus_degree() / 2);
     std::vector<heongpu::Ciphertext<Scheme>> blocks;
     blocks.reserve(M);
 
@@ -603,7 +690,8 @@ int main(int argc, char* argv[])
     std::vector<heongpu::Ciphertext<Scheme>> ct_ranks =
         multiCiphertextRank(blocks, L,
                             row_key, col_key, transr_key, sumr_key,
-                            sumc_key, transpc_key, rk, pe, enc, ctx, scale);
+                            sumc_key, transpc_key, rk, pe, enc, ctx, scale,
+                            use_fg, fg_dg, fg_df);
 
     float rank_ms = rank_timer.stopTimer();
     size_t gpu_rank_mib =
