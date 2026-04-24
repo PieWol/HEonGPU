@@ -605,7 +605,9 @@ int main(int argc, char* argv[])
         std::cerr << "Note: dnum=" << dnum
                   << " — requires >16 GB VRAM (e.g. L40 48 GB).\n";
 
-    // HE context: n=131072, Q={60, 59×(Q_size-1)}, P={60×P_size}
+    // n=131072 is the minimum ring dimension for 128-bit security at every N:
+    // even N=4 needs depth 37 → Q≈2243 bits, which exceeds the 1770-bit
+    // budget of n=65536. The depth (not the slot count) is the binding constraint.
     const size_t poly_modulus_degree = 131072;
 
     std::vector<int> q_bits = {60};
