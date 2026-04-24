@@ -28,7 +28,7 @@ import statistics
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/basic/18_ckks_sorting"
+BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/basic/22_ckks_sorting_paper"
 
 N_VALUES_DEFAULT = [8, 16, 32, 64, 128]
 
@@ -141,7 +141,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--binary", type=Path, default=BINARY_DEFAULT,
-        help="Path to 18_ckks_sorting binary"
+        help="Path to 22_ckks_sorting_paper binary"
     )
     parser.add_argument(
         "--n-values", type=int, nargs="+", default=N_VALUES_DEFAULT,
@@ -161,7 +161,7 @@ def main() -> None:
 
     if not args.binary.exists():
         print(f"Binary not found: {args.binary}")
-        print("Build first with: cmake --build build --target 18_ckks_sorting")
+        print("Build first with: cmake --build build --target 22_ckks_sorting_paper")
         sys.exit(1)
 
     for n in args.n_values:

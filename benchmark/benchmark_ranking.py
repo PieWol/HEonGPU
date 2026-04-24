@@ -29,7 +29,7 @@ from pathlib import Path
 
 # Default binary location relative to this script
 _SCRIPT_DIR = Path(__file__).resolve().parent
-BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/basic/16_ckks_ranking"
+BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/basic/17_ckks_ranking_paper"
 
 # Paper's single-ciphertext N values (N^2 <= 16384 slots with poly_deg=32768)
 N_VALUES_DEFAULT = [8, 16, 32, 64, 128]
@@ -144,7 +144,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--binary", type=Path, default=BINARY_DEFAULT,
-        help="Path to 16_ckks_ranking binary"
+        help="Path to 17_ckks_ranking_paper binary"
     )
     parser.add_argument(
         "--n-values", type=int, nargs="+", default=N_VALUES_DEFAULT,
@@ -165,7 +165,7 @@ def main() -> None:
     # Validate binary exists
     if not args.binary.exists():
         print(f"Binary not found: {args.binary}")
-        print("Build first with: cmake --build build --target 16_ckks_ranking")
+        print("Build first with: cmake --build build --target 17_ckks_ranking_paper")
         sys.exit(1)
 
     # Validate N values

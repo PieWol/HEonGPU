@@ -32,8 +32,8 @@ _BIN_DIR    = _SCRIPT_DIR.parent / "build/bin/examples/basic"
 
 # Each entry: (label, binary name, timing field in BENCH: output)
 BENCHMARKS = [
-    ("ranking", "16_ckks_ranking",  "rank_ms"),
-    ("sorting", "18_ckks_sorting",  "sort_ms"),
+    ("ranking", "17_ckks_ranking_paper",  "rank_ms"),
+    ("sorting", "22_ckks_sorting_paper",  "sort_ms"),
     ("minimum", "19_ckks_minimum",  "min_ms"),
     ("median",  "20_ckks_median",   "median_ms"),
 ]
