@@ -8,26 +8,37 @@
  * Uses the paper's exact fg-composite parameters at n=131072:
  *   dg_c=3, df_c=2 (compare)
  *   dg_i=(log2(N)+1)/2 (adaptive indicator), df_i=2
- *   scale=2^59 (matching decimalPrecision=59)
  *
- * This variant targets low N (N=2, N=4) where the VRAM budget of a
- * 16 GB GPU can accommodate n=131072 keys. It serves as a validation
- * point: proving that when given the paper's full depth and precision,
- * HEonGPU produces correct sorting results identical to OpenFHE.
+ * Scale adaptation for fixed-scale CKKS
+ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ * The paper uses OpenFHE's FLEXIBLEAUTO with decimalPrecision=59, giving
+ * a depth formula of 4*(dg_c+df_c+dg_i+df_i)+4.  Our fixed-scale CKKS
+ * needs one extra level for the encrypted MaskRow0 step, yielding +5.
  *
- * N=8 requires dnum=3 (Q+P=3499/3500 bits at the security limit),
- * pushing keys alone to ~7.4 GB and exceeding 16 GB during sorting.
+ * To compensate for this extra level and arrive at the same total Q
+ * budget (and thus the same dnum / key size / memory), we derive an
+ * equivalent fixed-scale prime size:
  *
- * P_size is maximized automatically to minimize dnum (key size):
- *   N=4: Q=38, P=20, dnum=2, keys~3.7 GB, peak~10 GB
- *   N=8: Q=42, P=17, dnum=3, keys~7.4 GB, OOM on 16 GB
+ *   Q_paper = 60 + depth_paper × 59 = 60 + 48 × 59 = 2892  (for N=256)
+ *   Q_ours  = 60 + depth_ours  × S  = 60 + 49 × S
  *
- * Depth budget (our implementation, +5 due to encrypted MaskRow0):
- *   N=4: dg_i=1, depth=4*(3+2+1+2)+5=37, Q=38 primes (0 spare)
- *   N=8: dg_i=2, depth=4*(3+2+2+2)+5=41, Q=42 primes (0 spare)
+ *   Set Q_ours = Q_paper:  S = floor(depth_paper × 59 / depth_ours)
+ *                            = floor(48 × 59 / 49) = 57
  *
- * The paper uses depth=4*sum+4 because FLEXIBLEAUTO handles the mask
- * step without an extra level. Our fixed-scale CKKS needs +5.
+ * General formula:
+ *   scale_bits = floor(depth_flexibleauto × scale_flexibleauto / depth_fixed)
+ *
+ * The 2-bit-per-level precision loss is negligible: for sorting N=256,
+ * values are normalized to [0,1] with minimum gap ~1/256 ≈ 0.004,
+ * requiring ~8 bits of precision.  A 57-bit scale provides ~17.1
+ * decimal digits — orders of magnitude more than needed.
+ *
+ * Example parameter budgets at n=131072 (security limit 3500 bits):
+ *                      ours (fixed-scale)           paper (FLEXIBLEAUTO)
+ *   N=4:   depth=37, Q=38, scale=57, dnum=2       depth=36, Q=37, dnum=2
+ *   N=8:   depth=41, Q=42, scale=57, dnum=3       depth=40, Q=41, dnum=3
+ *   N=64:  depth=45, Q=46, scale=57, dnum=4       depth=44, Q=45, dnum=4
+ *   N=256: depth=49, Q=50, scale=57, dnum=5       depth=48, Q=49, dnum=5
  *
  * Usage:  22_ckks_sorting_paper [N] [--bench]
  *   N       : vector length, power of 2, default 4
@@ -546,8 +557,15 @@ int main(int argc, char* argv[])
     const int df_i = 2;
     const int actual_depth = 4 * (dg_c + df_c + dg_i + df_i) + 5;
     const int Q_size = actual_depth + 1;
-    const int scale_bits = 59;
     const int security_bits = 3500;
+
+    // Derive equivalent fixed-scale prime size from the paper's FLEXIBLEAUTO setup.
+    // The paper uses depth_paper = actual_depth - 1 (FLEXIBLEAUTO saves 1 level on
+    // the MaskRow0 step) with scale_paper = 59.  To keep the same total Q budget:
+    //   scale_bits = floor(depth_paper × scale_paper / depth_fixed)
+    const int depth_paper = actual_depth - 1;
+    const int scale_paper = 59;
+    const int scale_bits = (depth_paper * scale_paper) / actual_depth;
 
     // Maximize P_size to minimize dnum (smaller keys).
     // Each P prime is 60 bits. P_size is bounded by the security budget.
@@ -576,7 +594,11 @@ int main(int argc, char* argv[])
 
     if (g_verbose)
     {
-        std::cout << "Paper-exact sorting: n=131072, scale=2^" << scale_bits << "\n";
+        std::cout << "Paper-exact sorting: n=131072\n";
+        std::cout << "Scale adaptation: paper uses FLEXIBLEAUTO depth="
+                  << depth_paper << " scale=2^" << scale_paper
+                  << " → fixed-scale depth=" << actual_depth
+                  << " scale=2^" << scale_bits << "\n";
         std::cout << "fg params: dg_c=" << dg_c << " df_c=" << df_c
                   << " dg_i=" << dg_i << " df_i=" << df_i
                   << "  depth=" << actual_depth
@@ -595,7 +617,7 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    if (dnum >= 6)
+    if (dnum >= 7)
         std::cerr << "Warning: dnum=" << dnum
                   << " — keys alone likely exceed 48 GB VRAM.\n";
     else if (dnum >= 4)
