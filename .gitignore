@@ -30,3 +30,4 @@ benchmark/*.csv
 *.vcxproj.filters
 *.DS_Store
 .misc/
+openfhe-statistics/
