@@ -227,8 +227,10 @@ int main(int argc, char* argv[])
     // Chebyshev evaluation (degree>=1023, 10+ levels) accumulates too much
     // noise at 35-bit precision in fixed-scale mode, so we use 40-bit primes.
     //
-    // HEonGPU also needs 2 extra levels beyond the paper's multiplicativeDepth
-    // (mod_drop for level alignment + explicit x0.5 normalization):
+    // HEonGPU (fixed-scale CKKS) needs 2 extra levels vs the paper (FLEXIBLEAUTO):
+    //   +1: mod_drop to align ct_row/ct_col levels before subtraction
+    //   +1: multiply_plain(0.5) + rescale for the normalization step
+    // FLEXIBLEAUTO absorbs both by deferring rescales and adjusting primes.
     //   Paper depth: compareDepth + 1  (max: 11+1 = 12 for N=128)
     //   HEonGPU depth: compareDepth + 3  (max: 11+3 = 14 for N=128)
     //
@@ -246,6 +248,8 @@ int main(int argc, char* argv[])
     //   (11 levels) while fitting within the n=32768 security budget.
     heongpu::HEContext<Scheme> context = heongpu::GenHEContext<Scheme>();
 
+    // n=32768 is the minimum ring dim: worst case Q+P=870 bits < 881-bit budget.
+    // Ranking's shallow depth (14 levels) keeps it well below n=65536's threshold.
     const size_t poly_modulus_degree = 32768;
     context->set_poly_modulus_degree(poly_modulus_degree);
 
