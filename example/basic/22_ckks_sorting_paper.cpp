@@ -595,10 +595,15 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    if (N > 4)
-        std::cerr << "Warning: N>" << 4
-                  << " requires dnum=" << dnum
-                  << " — keys may exceed 16 GB VRAM. N=8 is known to OOM.\n";
+    if (dnum >= 6)
+        std::cerr << "Warning: dnum=" << dnum
+                  << " — keys alone likely exceed 48 GB VRAM.\n";
+    else if (dnum >= 4)
+        std::cerr << "Warning: dnum=" << dnum
+                  << " — keys may exceed 16 GB VRAM. 48 GB GPU recommended.\n";
+    else if (dnum >= 3)
+        std::cerr << "Note: dnum=" << dnum
+                  << " — requires >16 GB VRAM (e.g. L40 48 GB).\n";
 
     // HE context: n=131072, Q={60, 59×(Q_size-1)}, P={60×P_size}
     const size_t poly_modulus_degree = 131072;
