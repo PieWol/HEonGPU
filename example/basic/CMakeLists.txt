@@ -28,6 +28,7 @@ set(EXECUTABLES
     20_ckks_median  20_ckks_median.cpp
     21_ckks_ranking_multi 21_ckks_ranking_multi.cpp
     22_ckks_sorting_paper 22_ckks_sorting_paper.cpp
+    23_ckks_ranking_tie_correction 23_ckks_ranking_tie_correction.cpp
 )
 
 function(add_example exe source)
