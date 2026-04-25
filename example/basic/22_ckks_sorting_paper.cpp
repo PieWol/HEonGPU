@@ -20,18 +20,20 @@
  *   Paper: 4*(sum)+4 (base) + 3 (tie correction) = 4*(sum)+7
  *   Ours:  4*(sum)+5 (base) + 2 (optimized TC)   = 4*(sum)+7
  *
- * Since depths match, we use the paper's exact 59-bit scale.
+ * Although depths match, FLEXIBLEAUTO uses variable-sized primes that
+ * average below the nominal 59 bits, leaving more room for P primes
+ * (and thus smaller dnum / keys).  Fixed-scale CKKS with uniform 59-bit
+ * primes needs 3069 Q-bits at depth=51, yielding dnum=8 — too large.
+ * We find the largest scale (starting from 59) that keeps dnum ≤ 5
+ * (the paper's maximum for single-CT sorting).  This gives scale=59
+ * where the budget allows (N≤16) and reduces to ~54 at deep chains.
  *
  * Example parameter budgets at n=131072 (security limit 3500 bits):
  *                      ours (fixed-scale)           paper (FLEXIBLEAUTO)
- *   N=4:   depth=39, Q=40, scale=59, dnum=3       depth=39, Q=40, dnum=2
+ *   N=4:   depth=39, Q=40, scale=57, dnum=2       depth=39, Q=40, dnum=2
  *   N=8:   depth=43, Q=44, scale=59, dnum=3       depth=43, Q=44, dnum=3
- *   N=64:  depth=47, Q=48, scale=59, dnum=4       depth=47, Q=48, dnum=4
- *   N=256: depth=51, Q=52, scale=59, dnum=5       depth=51, Q=52, dnum=5
- *
- * Multi-ciphertext sorting (N>256) is not implemented: the cross-block
- * indicator adds 2 levels (depth=51, Q=52), pushing dnum from 5 to 7.
- * At dnum=7, keys alone exceed 39 GB — beyond even the L40's 48 GB VRAM.
+ *   N=64:  depth=47, Q=48, scale=57, dnum=4       depth=47, Q=48, dnum=4
+ *   N=256: depth=51, Q=52, scale=54, dnum=5       depth=51, Q=52, dnum=5
  *
  * Tie correction (Algorithm 6) is always enabled: the paper proves sorting
  * correctness only when ranks form a permutation of (1,..,N), which requires
@@ -612,40 +614,58 @@ int main(int argc, char* argv[])
     const int Q_size = actual_depth + 1;
     const int security_bits = 3500;
 
-    // Our depth matches the paper's (MaskRow0 +1 offset by optimized TC -1),
-    // so we use the paper's exact 59-bit scale.
-    const int scale_bits = 59;
-
-    // Maximize P_size to minimize dnum (smaller keys).
-    // Each P prime is 60 bits. P_size is bounded by the security budget.
-    const int Q_bits = 60 + (Q_size - 1) * scale_bits;
-    int P_size = (security_bits - Q_bits) / 60;
-
-    // Reduce P_size until coefficient_validator passes:
-    // for each group of P_size consecutive Q primes, bit sum ≤ P_size*60
-    while (P_size > 1)
+    // FLEXIBLEAUTO uses variable-sized primes, achieving lower dnum than
+    // fixed-scale CKKS at the same depth.  Find the largest scale that
+    // keeps dnum <= 5 (the paper's maximum for single-CT sorting).
+    const int max_dnum = 5;
+    int scale_bits = 0, P_size = 0, dnum = 0, Q_bits = 0;
+    for (int s = 59; s >= 45; s--)
     {
-        int total_P = P_size * 60;
-        bool valid = true;
-        for (int i = 0; i < Q_size; i += P_size)
+        int q = 60 + (Q_size - 1) * s;
+        int p = (security_bits - q) / 60;
+        if (p < 1) continue;
+
+        while (p > 1)
         {
-            int group_sum = 0;
-            for (int j = i; j < std::min(i + P_size, Q_size); j++)
-                group_sum += (j == 0 ? 60 : scale_bits);
-            if (group_sum > total_P) { valid = false; break; }
+            int total_P = p * 60;
+            bool valid = true;
+            for (int i = 0; i < Q_size; i += p)
+            {
+                int group_sum = 0;
+                for (int j = i; j < std::min(i + p, Q_size); j++)
+                    group_sum += (j == 0 ? 60 : s);
+                if (group_sum > total_P) { valid = false; break; }
+            }
+            if (valid) break;
+            p--;
         }
-        if (valid) break;
-        P_size--;
+
+        int d = (Q_size + p - 1) / p;
+        if (d <= max_dnum)
+        {
+            scale_bits = s;
+            P_size = p;
+            dnum = d;
+            Q_bits = q;
+            break;
+        }
     }
 
-    int dnum = (Q_size + P_size - 1) / P_size;
+    if (scale_bits == 0)
+    {
+        std::cerr << "Error: cannot achieve dnum<=" << max_dnum
+                  << " for depth=" << actual_depth << " within "
+                  << security_bits << "-bit budget\n";
+        return EXIT_FAILURE;
+    }
+
     int total_bits = Q_bits + P_size * 60;
 
     if (g_verbose)
     {
         std::cout << "Paper-exact sorting: n=131072 (with tie correction)\n";
-        std::cout << "Depth matches paper (MaskRow0 +1 offset by optimized TC -1)"
-                  << "  depth=" << actual_depth
+        std::cout << "Scale adapted for dnum<=" << max_dnum
+                  << ":  depth=" << actual_depth
                   << "  scale=2^" << scale_bits << "\n";
         std::cout << "fg params: dg_c=" << dg_c << " df_c=" << df_c
                   << " dg_i=" << dg_i << " df_i=" << df_i
