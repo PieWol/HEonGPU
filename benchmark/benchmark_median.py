@@ -160,8 +160,7 @@ def main() -> None:
             print(f"Error: N={n} is not a positive power of 2")
             sys.exit(1)
         if n > 128:
-            print(f"Warning: N={n} requires multi-ciphertext mode "
-                  "(not yet implemented), skipping")
+            print(f"Warning: N={n} exceeds single-CT limit (128), skipping")
 
     n_values = [n for n in args.n_values if n <= 128]
     if not n_values:
