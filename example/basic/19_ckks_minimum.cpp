@@ -21,7 +21,7 @@
  *
  * HEonGPU depth: ceil(log2(degree)) levels per Chebyshev evaluation
  * (vs OpenFHE's depth2degree mapping which is 1 level more expensive).
- * Indicator normalization from [1,N] to [-1,1] costs 1 additional level.
+ * Indicator normalization from domain [0, N+1] to [-1,1] costs 1 level.
  *
  *   depth = 1 (TransR mask) + compare_levels + 1 (norm) + indicator_levels
  *   N<=32:  1 + 6 + 1 + 6 = 14, Q=15, dnum=1
