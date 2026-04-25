@@ -33,7 +33,7 @@
  *   N=4:   depth=39, Q=40, scale=57, dnum=2       depth=39, Q=40, dnum=2
  *   N=8:   depth=43, Q=44, scale=59, dnum=3       depth=43, Q=44, dnum=3
  *   N=64:  depth=47, Q=48, scale=57, dnum=4       depth=47, Q=48, dnum=4
- *   N=256: depth=51, Q=52, scale=54, dnum=5       depth=51, Q=52, dnum=5
+ *   N=256: depth=51, Q=52, scale=52, dnum=4       depth=51, Q=52, dnum=5
  *
  * Tie correction (Algorithm 6) is always enabled: the paper proves sorting
  * correctness only when ranks form a permutation of (1,..,N), which requires
@@ -618,8 +618,10 @@ int main(int argc, char* argv[])
     // fixed-scale CKKS at the same depth.  Find the largest scale that
     // keeps dnum <= the paper's value for this N.
     // Paper dnum targets (Table 2, Mazzone et al.):
-    //   N=4:2  N=8:3  N=16:3  N=32:3  N=64:4  N=128:5  N=256:5
-    const int paper_dnum[] = {0,0,2,3,3,3,4,5,5};  // indexed by logN
+    //   N=4:2  N=8:3  N=16:3  N=32:3  N=64:4  N=128:5  N=256:4(*)
+    //   (*) paper reports dnum=5 for N=256, but at n=131072 with fixed-scale
+    //       primes, dnum=5 keys alone consume ~25 GB — too tight for 48 GB GPUs.
+    const int paper_dnum[] = {0,0,2,3,3,3,4,5,4};  // indexed by logN
     const int max_dnum = (logN >= 2 && logN <= 8) ? paper_dnum[logN] : 5;
     int scale_bits = 0, P_size = 0, dnum = 0, Q_bits = 0;
     for (int s = 59; s >= 45; s--)
