@@ -69,7 +69,10 @@ def run_once(binary: Path, n: int, extra_args: list[str] = []) -> dict | None:
             data = {}
             for token in line[6:].strip().split():
                 k, v = token.split("=")
-                data[k] = float(v) if "." in v else int(v)
+                try:
+                    data[k] = float(v) if "." in v else int(v)
+                except ValueError:
+                    data[k] = v
             return data
 
     print(f"    No BENCH: line found. stdout:\n{result.stdout[:200]}",
@@ -94,12 +97,13 @@ def benchmark_one(binary: Path, label: str, timing_field: str,
     if not run_results:
         return None
 
-    keys = list(run_results[0].keys())
+    numeric_keys = [k for k in run_results[0]
+                    if isinstance(run_results[0][k], (int, float))]
     avg  = {f"{label}.{k}": statistics.mean(r[k] for r in run_results)
-            for k in keys}
+            for k in numeric_keys}
     if len(run_results) > 1:
         avg.update({f"{label}.{k}_stdev": statistics.stdev(r[k] for r in run_results)
-                    for k in keys})
+                    for k in numeric_keys})
     avg[f"{label}.runs"] = len(run_results)
     # Convenience: plain timing in seconds
     avg[f"{label}.{timing_field[:-3]}_s"] = avg[f"{label}.{timing_field}"] / 1000.0
