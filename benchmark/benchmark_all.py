@@ -4,8 +4,14 @@ Overarching benchmark runner for all HE order-statistics algorithms from:
   "Efficient Ranking, Order Statistics, and Sorting under CKKS"
   Mazzone et al., USENIX Security 2025
 
-Runs ranking, sorting, minimum, and median for each N and saves a combined
-CSV that allows direct comparison of timings across all four algorithms.
+Runs ranking (basic + tie-corrected), sorting, minimum, and median for each N
+and saves a combined CSV that allows direct comparison of timings across all
+algorithms.  Per-algorithm N caps are enforced automatically:
+  - ranking:    N <= 128
+  - ranking_tc: N <= 64  (tie correction adds 2 levels)
+  - sorting:    N <= 256
+  - minimum:    N <= 128
+  - median:     N <= 128
 
 Usage:
     python3 benchmark_all.py [--n-values N1 N2 ...] [--runs R] [--output FILE]
@@ -13,11 +19,11 @@ Usage:
     # Quick test:
     python3 benchmark_all.py --n-values 8 16 --runs 1
 
-    # Full paper-equivalent single-ciphertext sweep (default):
+    # Full paper-equivalent sweep (default — includes N=256 for sorting):
     python3 benchmark_all.py
 
     # Custom N set, 5 runs each:
-    python3 benchmark_all.py --n-values 8 16 32 64 128 --runs 5
+    python3 benchmark_all.py --n-values 8 16 32 64 128 256 --runs 5
 """
 
 import subprocess
@@ -30,22 +36,23 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _BIN_DIR    = _SCRIPT_DIR.parent / "build/bin/examples/basic"
 
-# Each entry: (label, binary name, timing field in BENCH: output)
+# Each entry: (label, binary name, timing field, extra args, max N)
 BENCHMARKS = [
-    ("ranking", "17_ckks_ranking_paper",  "rank_ms"),
-    ("sorting", "22_ckks_sorting_paper",  "sort_ms"),
-    ("minimum", "19_ckks_minimum",  "min_ms"),
-    ("median",  "20_ckks_median",   "median_ms"),
+    ("ranking",    "23_ckks_ranking_tie_correction",  "rank_ms",   [],                  128),
+    ("ranking_tc", "23_ckks_ranking_tie_correction",  "rank_ms",   ["--tie-correction"], 64),
+    ("sorting",    "22_ckks_sorting_paper",           "sort_ms",   [],                  256),
+    ("minimum",    "19_ckks_minimum",                 "min_ms",    [],                  128),
+    ("median",     "20_ckks_median",                  "median_ms", [],                  128),
 ]
 
-N_VALUES_DEFAULT = [8, 16, 32, 64, 128]
+N_VALUES_DEFAULT = [8, 16, 32, 64, 128, 256]
 
 
-def run_once(binary: Path, n: int) -> dict | None:
+def run_once(binary: Path, n: int, extra_args: list[str] = []) -> dict | None:
     """Run binary for N in bench mode; return parsed BENCH: fields or None."""
     try:
         result = subprocess.run(
-            [str(binary), str(n), "--bench"],
+            [str(binary), str(n), "--bench"] + extra_args,
             capture_output=True, text=True, timeout=600
         )
     except subprocess.TimeoutExpired:
@@ -71,12 +78,12 @@ def run_once(binary: Path, n: int) -> dict | None:
 
 
 def benchmark_one(binary: Path, label: str, timing_field: str,
-                  n: int, runs: int) -> dict | None:
+                  n: int, runs: int, extra_args: list[str] = []) -> dict | None:
     """Run `runs` trials of one binary for one N; return averaged stats."""
     run_results = []
     for run_idx in range(runs):
         print(f"    [{label}] run {run_idx + 1}/{runs} ...", end=" ", flush=True)
-        data = run_once(binary, n)
+        data = run_once(binary, n, extra_args)
         if data is None:
             print("FAILED")
             continue
@@ -97,24 +104,6 @@ def benchmark_one(binary: Path, label: str, timing_field: str,
     # Convenience: plain timing in seconds
     avg[f"{label}.{timing_field[:-3]}_s"] = avg[f"{label}.{timing_field}"] / 1000.0
     return avg
-
-
-def run_all_for_n(n: int, runs: int,
-                  binaries: dict[str, Path]) -> dict | None:
-    """Run every benchmark for a single N; merge into one flat result dict."""
-    row = {"n": n}
-    for label, _, timing_field in BENCHMARKS:
-        binary = binaries[label]
-        result = benchmark_one(binary, label, timing_field, n, runs)
-        if result is None:
-            print(f"  All runs failed for [{label}] N={n}", file=sys.stderr)
-            # Fill with NaN so other benchmarks still appear in the CSV
-            row[f"{label}.{timing_field}"]            = float("nan")
-            row[f"{label}.{timing_field[:-3]}_s"]     = float("nan")
-            row[f"{label}.gpu_peak_mib"]               = float("nan")
-        else:
-            row.update(result)
-    return row
 
 
 def print_comparison_table(results: list[dict]) -> None:
@@ -145,9 +134,8 @@ def print_comparison_table(results: list[dict]) -> None:
         print(f"{r['n']:>6}  {ms_cols}  {s_cols}")
     print(sep)
 
-    # Also print relative cost (normalised to ranking)
     ref_label = "ranking"
-    ref_field = next(tf for l, _, tf in BENCHMARKS if l == ref_label)
+    ref_field = next(tf for l, _, tf, _, _ in BENCHMARKS if l == ref_label)
     print(f"\nRelative cost (normalised to {ref_label}):")
     print(f"{'N':>6}  " + "  ".join(f"{l:>{col_w}}" for l in labels))
     print("-" * (8 + (col_w + 2) * len(labels)))
@@ -183,7 +171,7 @@ def main() -> None:
     parser.add_argument(
         "--n-values", type=int, nargs="+", default=N_VALUES_DEFAULT,
         metavar="N",
-        help="Vector lengths to benchmark (powers of 2, N<=128)"
+        help="Vector lengths to benchmark (powers of 2; per-algorithm caps apply)"
     )
     parser.add_argument(
         "--runs", type=int, default=3,
@@ -208,9 +196,10 @@ def main() -> None:
 
     # Resolve binaries and validate they exist
     binaries: dict[str, Path] = {}
-    active_benchmarks = [(l, b, tf) for l, b, tf in BENCHMARKS if l not in args.skip]
+    active_benchmarks = [(l, b, tf, ea, mn) for l, b, tf, ea, mn in BENCHMARKS
+                         if l not in args.skip]
     missing = []
-    for label, binary_name, _ in active_benchmarks:
+    for label, binary_name, _, _, _ in active_benchmarks:
         path = args.bin_dir / binary_name
         binaries[label] = path
         if not path.exists():
@@ -220,26 +209,24 @@ def main() -> None:
         for label, path in missing:
             print(f"Binary not found [{label}]: {path}")
         print("\nBuild missing binaries with:")
-        for label, _, _ in active_benchmarks:
-            bin_name = next(b for l, b, _ in BENCHMARKS if l == label)
+        for label, _, _, _, _ in active_benchmarks:
+            bin_name = next(b for l, b, _, _, _ in BENCHMARKS if l == label)
             print(f"  cmake --build build --target {bin_name}")
         sys.exit(1)
 
     # Validate N values
+    max_n = max(mn for _, _, _, _, mn in active_benchmarks)
     for n in args.n_values:
         if n <= 0 or (n & (n - 1)) != 0:
             print(f"Error: N={n} is not a positive power of 2")
             sys.exit(1)
-        if n > 128:
-            print(f"Warning: N={n} requires multi-ciphertext mode "
-                  "(not yet implemented), skipping")
 
-    n_values = [n for n in args.n_values if n <= 128]
+    n_values = [n for n in args.n_values if n <= max_n]
     if not n_values:
         print("No valid N values.")
         sys.exit(1)
 
-    active_labels = [l for l, _, _ in active_benchmarks]
+    active_labels = [l for l, _, _, _, _ in active_benchmarks]
     print(f"Algorithms : {', '.join(active_labels)}")
     print(f"N range    : {n_values}")
     print(f"Runs       : {args.runs} per algorithm per N")
@@ -251,8 +238,14 @@ def main() -> None:
         print(f"N = {n}")
         print(f"{'='*60}")
         row = {"n": n}
-        for label, _, timing_field in active_benchmarks:
-            result = benchmark_one(binaries[label], label, timing_field, n, args.runs)
+        for label, _, timing_field, extra_args, max_n in active_benchmarks:
+            if n > max_n:
+                print(f"    [{label}] skipped (N={n} > max {max_n})")
+                row[f"{label}.{timing_field}"]        = float("nan")
+                row[f"{label}.{timing_field[:-3]}_s"] = float("nan")
+                continue
+            result = benchmark_one(binaries[label], label, timing_field,
+                                   n, args.runs, extra_args)
             if result is None:
                 print(f"  All runs failed for [{label}] N={n}", file=sys.stderr)
                 row[f"{label}.{timing_field}"]        = float("nan")
@@ -263,9 +256,10 @@ def main() -> None:
         all_results.append(row)
 
         # Per-N summary line
+        active_for_n = [(l, tf) for l, _, tf, _, mn in active_benchmarks if n <= mn]
         summary = "  Summary: " + "  |  ".join(
             f"{l}={row.get(f'{l}.{tf}', float('nan')):.1f}ms"
-            for l, _, tf in active_benchmarks
+            for l, tf in active_for_n
         )
         print(summary)
 

@@ -28,7 +28,7 @@ import statistics
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/basic/24_ckks_ranking_tie_correction"
+BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/basic/23_ckks_ranking_tie_correction"
 
 N_VALUES_DEFAULT = [8, 16, 32, 64, 128]
 
@@ -168,7 +168,7 @@ def main() -> None:
 
     if not args.binary.exists():
         print(f"Binary not found: {args.binary}")
-        print("Build first with: cmake --build build --target 24_ckks_ranking_tie_correction")
+        print("Build first with: cmake --build build --target 23_ckks_ranking_tie_correction")
         sys.exit(1)
 
     for n in args.n_values:
