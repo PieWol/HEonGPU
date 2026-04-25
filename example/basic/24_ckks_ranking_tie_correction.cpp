@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <numeric>
 #include <omp.h>
 
 // Global verbose flag: false in --bench mode for clean parseable output
@@ -98,6 +99,51 @@ std::vector<double> normalizeForRanking(const std::vector<double>& input)
     return normalized;
 }
 
+std::vector<double> computeFractionalRanks(const std::vector<double>& input)
+{
+    int n = static_cast<int>(input.size());
+    std::vector<int> idx(n);
+    std::iota(idx.begin(), idx.end(), 0);
+    std::sort(idx.begin(), idx.end(),
+              [&](int a, int b) { return input[a] < input[b]; });
+
+    std::vector<double> ranks(n);
+    int i = 0;
+    while (i < n)
+    {
+        int j = i;
+        while (j < n && input[idx[j]] == input[idx[i]])
+            j++;
+        double mean_rank = 0.0;
+        for (int k = i; k < j; k++)
+            mean_rank += (k + 1);
+        mean_rank /= (j - i);
+        for (int k = i; k < j; k++)
+            ranks[idx[k]] = mean_rank;
+        i = j;
+    }
+    return ranks;
+}
+
+std::vector<double> computeOrdinalRanks(const std::vector<double>& input)
+{
+    int n = static_cast<int>(input.size());
+    std::vector<int> idx(n);
+    std::iota(idx.begin(), idx.end(), 0);
+    std::sort(idx.begin(), idx.end(),
+              [&](int a, int b)
+              {
+                  if (input[a] != input[b])
+                      return input[a] < input[b];
+                  return a < b;
+              });
+
+    std::vector<double> ranks(n);
+    for (int k = 0; k < n; k++)
+        ranks[idx[k]] = k + 1;
+    return ranks;
+}
+
 heongpu::Ciphertext<Scheme>
 basicRank(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
           heongpu::Galoiskey<Scheme>& row_galois_key,
@@ -162,10 +208,11 @@ std::vector<int> transposeGaloisShifts(int vec_len)
 
 int main(int argc, char* argv[])
 {
-    // Usage: 24_ckks_ranking_tie_correction [N] [--tie-correction] [--bench]
+    // Usage: 24_ckks_ranking_tie_correction [N] [--tie-correction] [--ties] [--bench]
     int vec_len         = 64;
     bool bench_mode     = false;
     bool tie_correction = false;
+    bool use_ties       = false;
     for (int i = 1; i < argc; i++)
     {
         std::string arg(argv[i]);
@@ -173,6 +220,8 @@ int main(int argc, char* argv[])
             bench_mode = true;
         else if (arg == "--tie-correction")
             tie_correction = true;
+        else if (arg == "--ties")
+            use_ties = true;
         else if (!arg.empty() &&
                  std::isdigit(static_cast<unsigned char>(arg[0])))
             vec_len = std::stoi(arg);
@@ -344,6 +393,11 @@ int main(int argc, char* argv[])
         for (int i = 0; i < vec_len; i++)
             input[i] = dist(rng);
     }
+    else if (use_ties)
+    {
+        for (int i = 0; i < vec_len; i++)
+            input[i] = static_cast<double>(i / 2 + 1);
+    }
     else
     {
         for (int i = 0; i < vec_len; i++)
@@ -406,34 +460,42 @@ int main(int argc, char* argv[])
     {
         std::cout << "\n=== Ranking Results ("
                   << (tie_correction ? "tie-corrected" : "basic, no tie correction")
-                  << ") ===\n";
+                  << (use_ties ? ", tied input" : "") << ") ===\n";
         std::cout << "Input vector:  ";
         display_vector(input, vec_len);
 
+        std::vector<double> expected_ranks = tie_correction
+                                                ? computeOrdinalRanks(input)
+                                                : computeFractionalRanks(input);
+
         std::cout << "Rank (1-based):\n";
         for (int i = 0; i < vec_len; i++)
-        {
-            double decoded_rank = rank_result[i];
             std::cout << "  input[" << i << "] = " << input[i]
-                      << " -> rank = " << decoded_rank << "\n";
-        }
+                      << " -> rank = " << rank_result[i]
+                      << "  (expected " << expected_ranks[i] << ")\n";
 
-        std::cout << "\nVerification (expected rank = index + 1):\n";
+        std::cout << "\nVerification:\n";
         bool all_correct = true;
+        int n_ties_wrong = 0;
         for (int i = 0; i < vec_len; i++)
         {
-            double expected_rank = static_cast<double>(i + 1);
-            double actual_rank   = rank_result[i];
-            double error         = std::abs(actual_rank - expected_rank);
-            bool is_correct      = (error < 0.5);
-            std::cout << "  Element " << (i + 1) << ": expected=" << expected_rank
-                      << ", actual=" << actual_rank
-                      << (is_correct ? "" : " INCORRECT") << "\n";
+            double error    = std::abs(rank_result[i] - expected_ranks[i]);
+            bool is_correct = (error < 0.5);
             if (!is_correct)
+            {
                 all_correct = false;
+                n_ties_wrong++;
+                std::cout << "  MISMATCH input[" << i << "]=" << input[i]
+                          << ": expected=" << expected_ranks[i]
+                          << ", actual=" << rank_result[i]
+                          << ", error=" << error << "\n";
+            }
         }
-        std::cout << (all_correct ? "\nAll ranking results correct!\n"
-                                  : "\nSome ranking results are incorrect!\n");
+        if (all_correct)
+            std::cout << "  All " << vec_len << " ranks correct!\n";
+        else
+            std::cout << "  " << n_ties_wrong << "/" << vec_len
+                      << " ranks incorrect.\n";
 
         std::cout << "\nTiming summary:\n";
         std::cout << "  Key generation : " << keygen_ms << " ms\n";
@@ -691,7 +753,8 @@ basicRank(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
     if (g_verbose)
         std::cout << "Step 10: Multiply E by adjusted mask and SumR...\n";
 
-    // Build adjusted mask: 0.5 for upper triangle (j >= i), -0.5 for lower
+    // Build adjusted mask: δ_{j≥i} (upper triangle) as in Algorithm 6.
+    // Our SumR sums over the row dimension (column-wise), same as the paper.
     size_t total_slots = context->get_poly_modulus_degree() / 2;
     std::vector<double> adj_mask_values(total_slots, 0.0);
     for (int i = 0; i < vec_len; i++)
