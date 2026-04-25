@@ -170,8 +170,12 @@ compareGtChebyshev(const heongpu::Ciphertext<Scheme>& a,
 
 // ---------------------------------------------------------------------------
 // Chebyshev indicator: detects rank ≈ 1 (minimum)
-// Pre-normalizes rank from [1, N] to [-1, 1], then evaluates Chebyshev.
-// Matches paper's indicator(c, 0.5, 1.5, 0.5, N+0.5, degree).
+// Pre-normalizes rank to [-1, 1] using domain [0, N+1] for noise headroom,
+// then evaluates Chebyshev indicator for rank ∈ [0.5, 1.5].
+//
+// Paper reference: indicator(c, 0.5, 1.5, 0.5, N+0.5, degree)
+// We widen the domain to [0, N+1] so that the maximum rank (≈ N+0.5 plus
+// CKKS noise) maps to u ≈ 0.85 instead of u ≈ 1.0, preventing T_n blowup.
 // ---------------------------------------------------------------------------
 static heongpu::Ciphertext<Scheme>
 indicatorChebyshev(heongpu::Ciphertext<Scheme>& ct, int N,
@@ -183,18 +187,21 @@ indicatorChebyshev(heongpu::Ciphertext<Scheme>& ct, int N,
         std::cout << "  indicatorChebyshev N=" << N
                   << " (degree=" << degree << ")\n";
 
-    // Normalize rank from [1, N] to [-1, 1]:
-    //   u = (2*rank - (N+1)) / N
+    // Normalize rank from domain [0, N+1] to [-1, 1]:
+    //   u = (2*rank - (N+1)) / (N+1) = 2*rank/(N+1) - 1
     heongpu::Ciphertext<Scheme> u = ct;
-    pe.multiply_plain_inplace(u, 2.0 / N, scale);
+    pe.multiply_plain_inplace(u, 2.0 / (N + 1), scale);
     pe.rescale_inplace(u);
-    pe.add_plain_inplace(u, -(N + 1.0) / N);
+    pe.add_plain_inplace(u, -1.0);
 
     if (g_verbose)
         std::cout << "  normalized level=" << u.level() << "\n";
 
-    // Indicator target: rank ∈ [0.5, 1.5] maps to u ∈ [-1, (2-N)/N]
-    double u_high = (2.0 - N) / N;
+    // Indicator target: rank ∈ [0.5, 2.0]
+    // Wider than the paper's [0.5, 1.5] to accommodate the nonzero
+    // self-comparison value from degree-59 compareGt (rank_min ≈ 1.4).
+    // In normalized space: u_high = (2*2.0 - (N+1)) / (N+1) = (3-N)/(N+1)
+    double u_high = (3.0 - N) / (N + 1.0);
     auto fn = [u_high](Complex64 x) -> Complex64 {
         double t = x.real();
         return {(t < u_high) ? 1.0 : 0.0, 0.0};
