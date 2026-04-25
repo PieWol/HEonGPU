@@ -35,18 +35,23 @@
  *
  * Example parameter budgets at n=131072 (security limit 3500 bits):
  *                      ours (fixed-scale)           paper (FLEXIBLEAUTO)
- *   N=4:   depth=37, Q=38, scale=57, dnum=2       depth=36, Q=37, dnum=2
- *   N=8:   depth=41, Q=42, scale=57, dnum=3       depth=40, Q=41, dnum=3
- *   N=64:  depth=45, Q=46, scale=57, dnum=4       depth=44, Q=45, dnum=4
- *   N=256: depth=49, Q=50, scale=57, dnum=5       depth=48, Q=49, dnum=5
+ *   N=4:   depth=40, Q=41, scale=57, dnum=3       depth=39, Q=40, dnum=2
+ *   N=8:   depth=44, Q=45, scale=57, dnum=3       depth=43, Q=44, dnum=3
+ *   N=64:  depth=48, Q=49, scale=57, dnum=4       depth=47, Q=48, dnum=4
+ *   N=256: depth=52, Q=53, scale=57, dnum=5       depth=51, Q=52, dnum=5
  *
  * Multi-ciphertext sorting (N>256) is not implemented: the cross-block
  * indicator adds 2 levels (depth=51, Q=52), pushing dnum from 5 to 7.
  * At dnum=7, keys alone exceed 39 GB — beyond even the L40's 48 GB VRAM.
  *
- * Usage:  22_ckks_sorting_paper [N] [--bench]
+ * Tie correction (Algorithm 6) is always enabled: the paper proves sorting
+ * correctness only when ranks form a permutation of (1,..,N), which requires
+ * the tie-correction offset.  This adds +3 levels to the depth budget.
+ *
+ * Usage:  22_ckks_sorting_paper [N] [--bench] [--ties]
  *   N       : vector length, power of 2, default 4
  *   --bench : machine-readable timing output only
+ *   --ties  : use paired tied input to verify tie correction
  */
 
 #include <heongpu/heongpu.hpp>
@@ -443,6 +448,72 @@ homomorphicSortFG(const heongpu::Ciphertext<Scheme>& ct_vector, int N,
     if (g_verbose) std::cout << "Step 4a: SumR(C) -> full sum in row 0\n";
     heongpu::Ciphertext<Scheme> R = sumRows(C, N, sumr_key, pe);
 
+    // --- Tie-correction offset (Algorithm 6 from Mazzone et al.) ---
+    // E = 4*C*(1-C): equality indicator (peaks at C=0.5 for tied pairs)
+    // correction = SumR(E * δ_{j≥i}) - 0.5 * SumR(E)
+    // Converts fractional ranks to a permutation of (1,..,N).
+    if (g_verbose) std::cout << "Step 4-tc1: E = 4*C*(1-C)\n";
+    {
+        heongpu::Ciphertext<Scheme> C_neg = C;
+        pe.negate_inplace(C_neg);
+        pe.add_plain_inplace(C_neg, 1.0);
+
+        heongpu::Ciphertext<Scheme> e_raw(ctx);
+        pe.multiply(C_neg, C, e_raw);
+        pe.relinearize_inplace(e_raw, rk);
+        pe.rescale_inplace(e_raw);
+
+        heongpu::Ciphertext<Scheme> e = e_raw;
+        pe.multiply_plain_inplace(e, 4.0, scale);
+        pe.rescale_inplace(e);
+
+        if (g_verbose)
+            std::cout << "  E level=" << e.level() << "\n";
+
+        if (g_verbose) std::cout << "Step 4-tc2: E * upper-triangular mask\n";
+        std::vector<double> tri_mask(slots, 0.0);
+        for (int i = 0; i < N; i++)
+            for (int j = 0; j < N; j++)
+                if (j >= i) tri_mask[i * N + j] = 1.0;
+
+        heongpu::Plaintext<Scheme> pt_tri(ctx);
+        enc.encode(pt_tri, tri_mask, scale);
+        while (pt_tri.depth() < e.depth())
+            pe.mod_drop_inplace(pt_tri);
+
+        heongpu::Ciphertext<Scheme> e_tri = e;
+        pe.multiply_plain_inplace(e_tri, pt_tri);
+        pe.rescale_inplace(e_tri);
+
+        if (g_verbose) std::cout << "Step 4-tc3: correction = SumR(E*mask) - 0.5*SumR(E)\n";
+        heongpu::Ciphertext<Scheme> sumR_e_tri = sumRows(e_tri, N, sumr_key, pe);
+
+        heongpu::Ciphertext<Scheme> sumR_e = sumRows(e, N, sumr_key, pe);
+        pe.multiply_plain_inplace(sumR_e, 0.5, scale);
+        pe.rescale_inplace(sumR_e);
+
+        while (sumR_e_tri.level() > sumR_e.level())
+        {
+            heongpu::Ciphertext<Scheme> tmp(ctx);
+            pe.mod_drop(sumR_e_tri, tmp);
+            sumR_e_tri = std::move(tmp);
+        }
+
+        heongpu::Ciphertext<Scheme> correction(ctx);
+        pe.sub(sumR_e_tri, sumR_e, correction);
+
+        while (R.level() > correction.level())
+        {
+            heongpu::Ciphertext<Scheme> tmp(ctx);
+            pe.mod_drop(R, tmp);
+            R = std::move(tmp);
+        }
+
+        pe.add_inplace(R, correction);
+        if (g_verbose)
+            std::cout << "  corrected R level=" << R.level() << "\n";
+    }
+
     if (g_verbose) std::cout << "Step 4b: MaskRow0\n";
     {
         std::vector<double> row0_mask(slots, 0.0);
@@ -474,10 +545,11 @@ homomorphicSortFG(const heongpu::Ciphertext<Scheme>& ct_vector, int N,
     // Phase 2: one-hot indicator
     if (g_verbose) std::cout << "\n=== Phase 2: one-hot indicator ===\n";
 
+    // Corrected ranks are integers {1,..,N} → shift row k by -(k+1).
     std::vector<double> sub_vals(slots, 0.0);
     for (int k = 0; k < N; k++)
         for (int j = 0; j < N; j++)
-            sub_vals[k * N + j] = -(static_cast<double>(k) + 0.5);
+            sub_vals[k * N + j] = -(static_cast<double>(k) + 1.0);
 
     heongpu::Plaintext<Scheme> pt_sub(ctx);
     enc.encode(pt_sub, sub_vals, scale);
@@ -534,11 +606,14 @@ int main(int argc, char* argv[])
 {
     int  N          = 4;
     bool bench_mode = false;
+    bool use_ties   = false;
     for (int i = 1; i < argc; i++)
     {
         std::string arg(argv[i]);
         if (arg == "--bench")
             bench_mode = true;
+        else if (arg == "--ties")
+            use_ties = true;
         else if (!arg.empty() && std::isdigit(static_cast<unsigned char>(arg[0])))
             N = std::stoi(arg);
     }
@@ -559,7 +634,7 @@ int main(int argc, char* argv[])
     const int df_c = 2;
     const int dg_i = (logN + 1) / 2;
     const int df_i = 2;
-    const int actual_depth = 4 * (dg_c + df_c + dg_i + df_i) + 5;
+    const int actual_depth = 4 * (dg_c + df_c + dg_i + df_i) + 8;
     const int Q_size = actual_depth + 1;
     const int security_bits = 3500;
 
@@ -598,7 +673,7 @@ int main(int argc, char* argv[])
 
     if (g_verbose)
     {
-        std::cout << "Paper-exact sorting: n=131072\n";
+        std::cout << "Paper-exact sorting: n=131072 (with tie correction)\n";
         std::cout << "Scale adaptation: paper uses FLEXIBLEAUTO depth="
                   << depth_paper << " scale=2^" << scale_paper
                   << " → fixed-scale depth=" << actual_depth
@@ -713,6 +788,11 @@ int main(int argc, char* argv[])
         std::uniform_real_distribution<double> dist(0.0, 100.0);
         for (int i = 0; i < N; i++) input[i] = dist(rng);
     }
+    else if (use_ties)
+    {
+        for (int i = 0; i < N; i++)
+            input[i] = static_cast<double>((N - 1 - i) / 2 + 1);
+    }
     else
     {
         for (int i = 0; i < N; i++) input[i] = static_cast<double>(N - 1 - i);
@@ -784,7 +864,8 @@ int main(int argc, char* argv[])
     }
     else
     {
-        std::cout << "\n=== Sorting Results ===\n";
+        std::cout << "\n=== Sorting Results"
+                  << (use_ties ? " (tied input)" : "") << " ===\n";
         std::cout << "HE sorted (normalized):     "; display_vector(he_sorted, N);
         std::cout << "HE sorted (original scale): "; display_vector(he_sorted_orig, N);
 
