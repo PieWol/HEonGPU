@@ -99,15 +99,17 @@ sumRows(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
         CKKSPolyEvaluator& evaluator,
         heongpu::HEContext<Scheme>& context);
 
-// Matches the paper's compareDepth table (test-ranking.cpp, no tie correction):
+// Matches the paper's compareDepth table (test-ranking.cpp):
 //   N<=8:   compareDepth=7  -> degree=127   (min gap ~ 1/7)
 //   N<=16:  compareDepth=8  -> degree=255   (min gap ~ 1/15)
+//   N<=32:  compareDepth=9  -> degree=511   (min gap ~ 1/31)
 //   N<=64:  compareDepth=10 -> degree=1023  (min gap ~ 1/63)
 //   N<=128: compareDepth=11 -> degree=2047  (min gap ~ 1/127)
 int selectChebyshevDegree(int N)
 {
     if (N <= 8)  return 127;
     if (N <= 16) return 255;
+    if (N <= 32) return 511;
     if (N <= 64) return 1023;
     return 2047;
 }
