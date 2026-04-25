@@ -13,32 +13,21 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  * The paper uses OpenFHE's FLEXIBLEAUTO with decimalPrecision=59, giving
  * a depth formula of 4*(dg_c+df_c+dg_i+df_i)+4.  Our fixed-scale CKKS
- * needs one extra level for the encrypted MaskRow0 step, yielding +5.
+ * needs one extra level for the encrypted MaskRow0 step (+5 base), but
+ * our optimized tie correction saves one level vs the paper's Algorithm 6
+ * (+2 instead of +3).  These cancel out, giving the same total depth:
  *
- * To compensate for this extra level and arrive at the same total Q
- * budget (and thus the same dnum / key size / memory), we derive an
- * equivalent fixed-scale prime size:
+ *   Paper: 4*(sum)+4 (base) + 3 (tie correction) = 4*(sum)+7
+ *   Ours:  4*(sum)+5 (base) + 2 (optimized TC)   = 4*(sum)+7
  *
- *   Q_paper = 60 + depth_paper × 59 = 60 + 48 × 59 = 2892  (for N=256)
- *   Q_ours  = 60 + depth_ours  × S  = 60 + 49 × S
- *
- *   Set Q_ours = Q_paper:  S = floor(depth_paper × 59 / depth_ours)
- *                            = floor(48 × 59 / 49) = 57
- *
- * General formula:
- *   scale_bits = floor(depth_flexibleauto × scale_flexibleauto / depth_fixed)
- *
- * The 2-bit-per-level precision loss is negligible: for sorting N=256,
- * values are normalized to [0,1] with minimum gap ~1/256 ≈ 0.004,
- * requiring ~8 bits of precision.  A 57-bit scale provides ~17.1
- * decimal digits — orders of magnitude more than needed.
+ * Since depths match, we use the paper's exact 59-bit scale.
  *
  * Example parameter budgets at n=131072 (security limit 3500 bits):
  *                      ours (fixed-scale)           paper (FLEXIBLEAUTO)
- *   N=4:   depth=40, Q=41, scale=57, dnum=3       depth=39, Q=40, dnum=2
- *   N=8:   depth=44, Q=45, scale=57, dnum=3       depth=43, Q=44, dnum=3
- *   N=64:  depth=48, Q=49, scale=57, dnum=4       depth=47, Q=48, dnum=4
- *   N=256: depth=52, Q=53, scale=57, dnum=5       depth=51, Q=52, dnum=5
+ *   N=4:   depth=39, Q=40, scale=59, dnum=3       depth=39, Q=40, dnum=2
+ *   N=8:   depth=43, Q=44, scale=59, dnum=3       depth=43, Q=44, dnum=3
+ *   N=64:  depth=47, Q=48, scale=59, dnum=4       depth=47, Q=48, dnum=4
+ *   N=256: depth=51, Q=52, scale=59, dnum=5       depth=51, Q=52, dnum=5
  *
  * Multi-ciphertext sorting (N>256) is not implemented: the cross-block
  * indicator adds 2 levels (depth=51, Q=52), pushing dnum from 5 to 7.
@@ -46,7 +35,9 @@
  *
  * Tie correction (Algorithm 6) is always enabled: the paper proves sorting
  * correctness only when ranks form a permutation of (1,..,N), which requires
- * the tie-correction offset.  This adds +3 levels to the depth budget.
+ * the tie-correction offset.  This adds +2 levels to the depth budget
+ * (optimized: the ×4 factor and mask-0.5 are folded into a single adjusted
+ * plaintext multiply).
  *
  * Usage:  22_ckks_sorting_paper [N] [--bench] [--ties]
  *   N       : vector length, power of 2, default 4
@@ -449,10 +440,12 @@ homomorphicSortFG(const heongpu::Ciphertext<Scheme>& ct_vector, int N,
     heongpu::Ciphertext<Scheme> R = sumRows(C, N, sumr_key, pe);
 
     // --- Tie-correction offset (Algorithm 6 from Mazzone et al.) ---
-    // E = 4*C*(1-C): equality indicator (peaks at C=0.5 for tied pairs)
-    // correction = SumR(E * δ_{j≥i}) - 0.5 * SumR(E)
-    // Converts fractional ranks to a permutation of (1,..,N).
-    if (g_verbose) std::cout << "Step 4-tc1: E = 4*C*(1-C)\n";
+    // correction = SumR(E·(mask - 0.5)) where E = 4·C·(1-C), mask = δ_{j≥i}
+    //
+    // Optimization: fold the ×4 and the mask-0.5 into one plaintext multiply
+    // on e_raw = C·(1-C), saving 1 level and 1 SumR vs the naive approach.
+    //   correction = SumR(e_raw · adjusted)   where adjusted[i,j] = 2 if j≥i, -2 otherwise
+    if (g_verbose) std::cout << "Step 4-tc1: e_raw = C*(1-C)\n";
     {
         heongpu::Ciphertext<Scheme> C_neg = C;
         pe.negate_inplace(C_neg);
@@ -463,44 +456,25 @@ homomorphicSortFG(const heongpu::Ciphertext<Scheme>& ct_vector, int N,
         pe.relinearize_inplace(e_raw, rk);
         pe.rescale_inplace(e_raw);
 
-        heongpu::Ciphertext<Scheme> e = e_raw;
-        pe.multiply_plain_inplace(e, 4.0, scale);
-        pe.rescale_inplace(e);
-
         if (g_verbose)
-            std::cout << "  E level=" << e.level() << "\n";
+            std::cout << "  e_raw level=" << e_raw.level() << "\n";
 
-        if (g_verbose) std::cout << "Step 4-tc2: E * upper-triangular mask\n";
-        std::vector<double> tri_mask(slots, 0.0);
+        if (g_verbose) std::cout << "Step 4-tc2: e_raw * adjusted mask (4·(δ_{j≥i} - 0.5))\n";
+        std::vector<double> adj_mask(slots, 0.0);
         for (int i = 0; i < N; i++)
             for (int j = 0; j < N; j++)
-                if (j >= i) tri_mask[i * N + j] = 1.0;
+                adj_mask[i * N + j] = (j >= i) ? 2.0 : -2.0;
 
-        heongpu::Plaintext<Scheme> pt_tri(ctx);
-        enc.encode(pt_tri, tri_mask, scale);
-        while (pt_tri.depth() < e.depth())
-            pe.mod_drop_inplace(pt_tri);
+        heongpu::Plaintext<Scheme> pt_adj(ctx);
+        enc.encode(pt_adj, adj_mask, scale);
+        while (pt_adj.depth() < e_raw.depth())
+            pe.mod_drop_inplace(pt_adj);
 
-        heongpu::Ciphertext<Scheme> e_tri = e;
-        pe.multiply_plain_inplace(e_tri, pt_tri);
-        pe.rescale_inplace(e_tri);
+        pe.multiply_plain_inplace(e_raw, pt_adj);
+        pe.rescale_inplace(e_raw);
 
-        if (g_verbose) std::cout << "Step 4-tc3: correction = SumR(E*mask) - 0.5*SumR(E)\n";
-        heongpu::Ciphertext<Scheme> sumR_e_tri = sumRows(e_tri, N, sumr_key, pe);
-
-        heongpu::Ciphertext<Scheme> sumR_e = sumRows(e, N, sumr_key, pe);
-        pe.multiply_plain_inplace(sumR_e, 0.5, scale);
-        pe.rescale_inplace(sumR_e);
-
-        while (sumR_e_tri.level() > sumR_e.level())
-        {
-            heongpu::Ciphertext<Scheme> tmp(ctx);
-            pe.mod_drop(sumR_e_tri, tmp);
-            sumR_e_tri = std::move(tmp);
-        }
-
-        heongpu::Ciphertext<Scheme> correction(ctx);
-        pe.sub(sumR_e_tri, sumR_e, correction);
+        if (g_verbose) std::cout << "Step 4-tc3: correction = SumR(e_raw * adj_mask)\n";
+        heongpu::Ciphertext<Scheme> correction = sumRows(e_raw, N, sumr_key, pe);
 
         while (R.level() > correction.level())
         {
@@ -634,17 +608,13 @@ int main(int argc, char* argv[])
     const int df_c = 2;
     const int dg_i = (logN + 1) / 2;
     const int df_i = 2;
-    const int actual_depth = 4 * (dg_c + df_c + dg_i + df_i) + 8;
+    const int actual_depth = 4 * (dg_c + df_c + dg_i + df_i) + 7;
     const int Q_size = actual_depth + 1;
     const int security_bits = 3500;
 
-    // Derive equivalent fixed-scale prime size from the paper's FLEXIBLEAUTO setup.
-    // The paper uses depth_paper = actual_depth - 1 (FLEXIBLEAUTO saves 1 level on
-    // the MaskRow0 step) with scale_paper = 59.  To keep the same total Q budget:
-    //   scale_bits = floor(depth_paper × scale_paper / depth_fixed)
-    const int depth_paper = actual_depth - 1;
-    const int scale_paper = 59;
-    const int scale_bits = (depth_paper * scale_paper) / actual_depth;
+    // Our depth matches the paper's (MaskRow0 +1 offset by optimized TC -1),
+    // so we use the paper's exact 59-bit scale.
+    const int scale_bits = 59;
 
     // Maximize P_size to minimize dnum (smaller keys).
     // Each P prime is 60 bits. P_size is bounded by the security budget.
@@ -674,10 +644,9 @@ int main(int argc, char* argv[])
     if (g_verbose)
     {
         std::cout << "Paper-exact sorting: n=131072 (with tie correction)\n";
-        std::cout << "Scale adaptation: paper uses FLEXIBLEAUTO depth="
-                  << depth_paper << " scale=2^" << scale_paper
-                  << " → fixed-scale depth=" << actual_depth
-                  << " scale=2^" << scale_bits << "\n";
+        std::cout << "Depth matches paper (MaskRow0 +1 offset by optimized TC -1)"
+                  << "  depth=" << actual_depth
+                  << "  scale=2^" << scale_bits << "\n";
         std::cout << "fg params: dg_c=" << dg_c << " df_c=" << df_c
                   << " dg_i=" << dg_i << " df_i=" << df_i
                   << "  depth=" << actual_depth
