@@ -40,6 +40,10 @@
  *   N=64:  depth=45, Q=46, scale=57, dnum=4       depth=44, Q=45, dnum=4
  *   N=256: depth=49, Q=50, scale=57, dnum=5       depth=48, Q=49, dnum=5
  *
+ * Multi-ciphertext sorting (N>256) is not implemented: the cross-block
+ * indicator adds 2 levels (depth=51, Q=52), pushing dnum from 5 to 7.
+ * At dnum=7, keys alone exceed 39 GB — beyond even the L40's 48 GB VRAM.
+ *
  * Usage:  22_ckks_sorting_paper [N] [--bench]
  *   N       : vector length, power of 2, default 4
  *   --bench : machine-readable timing output only
