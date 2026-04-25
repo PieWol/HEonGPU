@@ -616,8 +616,11 @@ int main(int argc, char* argv[])
 
     // FLEXIBLEAUTO uses variable-sized primes, achieving lower dnum than
     // fixed-scale CKKS at the same depth.  Find the largest scale that
-    // keeps dnum <= 5 (the paper's maximum for single-CT sorting).
-    const int max_dnum = 5;
+    // keeps dnum <= the paper's value for this N.
+    // Paper dnum targets (Table 2, Mazzone et al.):
+    //   N=4:2  N=8:3  N=16:3  N=32:3  N=64:4  N=128:5  N=256:5
+    const int paper_dnum[] = {0,0,2,3,3,3,4,5,5};  // indexed by logN
+    const int max_dnum = (logN >= 2 && logN <= 8) ? paper_dnum[logN] : 5;
     int scale_bits = 0, P_size = 0, dnum = 0, Q_bits = 0;
     for (int s = 59; s >= 45; s--)
     {
@@ -664,8 +667,8 @@ int main(int argc, char* argv[])
     if (g_verbose)
     {
         std::cout << "Paper-exact sorting: n=131072 (with tie correction)\n";
-        std::cout << "Scale adapted for dnum<=" << max_dnum
-                  << ":  depth=" << actual_depth
+        std::cout << "Scale adapted for paper dnum<=" << max_dnum
+                  << " (N=" << N << "):  depth=" << actual_depth
                   << "  scale=2^" << scale_bits << "\n";
         std::cout << "fg params: dg_c=" << dg_c << " df_c=" << df_c
                   << " dg_i=" << dg_i << " df_i=" << df_i
@@ -709,9 +712,13 @@ int main(int argc, char* argv[])
     ctx->set_coeff_modulus_bit_sizes(q_bits, p_bits);
     double scale = std::pow(2.0, scale_bits);
 
+    heongpu::MemoryPoolConfig pool_config;
+    pool_config.initial_device_fraction = 90.0f;
+    pool_config.max_device_fraction = 95.0f;
+
     GPUTimer ctx_timer;
     ctx_timer.startTimer();
-    ctx->generate();
+    ctx->generate(pool_config);
     float ctx_ms = ctx_timer.stopTimer();
 
     const int slots = static_cast<int>(poly_modulus_degree / 2);
