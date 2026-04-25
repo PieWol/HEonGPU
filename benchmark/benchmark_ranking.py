@@ -4,8 +4,8 @@ Benchmark HE ranking for varying N, mimicking the experimental setup of:
   "Efficient Ranking, Order Statistics, and Sorting under CKKS"
   Mazzone et al., USENIX Security 2025
 
-The paper tests N = 8, 16, 32, 64, 128 in single-ciphertext mode and
-N = 256, 512, ... in multi-ciphertext mode (not yet implemented).
+The paper tests N = 8, 16, 32, 64, 128 in single-ciphertext mode.
+For N > 128, use benchmark_ranking_multi.py (multi-ciphertext mode).
 
 Usage:
     python3 benchmark_ranking.py [--n-values N1 N2 ...] [--runs R] [--output FILE]
@@ -174,8 +174,8 @@ def main() -> None:
             print(f"Error: N={n} is not a positive power of 2")
             sys.exit(1)
         if n > 128:
-            print(f"Warning: N={n} requires multi-ciphertext mode "
-                  "(not yet implemented), skipping")
+            print(f"Warning: N={n} exceeds single-CT limit (128). "
+                  "Use benchmark_ranking_multi.py for N > 128, skipping")
 
     n_values = [n for n in args.n_values if n <= 128]
     if not n_values:

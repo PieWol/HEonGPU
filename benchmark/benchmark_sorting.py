@@ -4,8 +4,10 @@ Benchmark HE sorting for varying N, mimicking the experimental setup of:
   "Efficient Ranking, Order Statistics, and Sorting under CKKS"
   Mazzone et al., USENIX Security 2025
 
-The paper tests N = 8, 16, 32, 64, 128 in single-ciphertext mode and
-N = 256, 512, ... in multi-ciphertext mode (not yet implemented).
+Single-ciphertext sorting supports N up to 256 (256² = 65536 = n/2
+slots at n=131072).  Multi-ciphertext sorting (N > 256) is infeasible
+on current GPUs: the extra depth pushes dnum from 5 to 7, exceeding
+48 GB VRAM for keys alone.
 
 Usage:
     python3 benchmark_sorting.py [--n-values N1 N2 ...] [--runs R] [--output FILE]
@@ -13,11 +15,11 @@ Usage:
     # Quick test:
     python3 benchmark_sorting.py --n-values 8 16 32 --runs 1
 
-    # Full paper-equivalent single-ciphertext sweep (default):
+    # Full single-ciphertext sweep (default):
     python3 benchmark_sorting.py
 
-    # Custom N set, 5 runs each:
-    python3 benchmark_sorting.py --n-values 8 16 32 64 128 --runs 5
+    # Include N=256 (requires L40 48 GB GPU, ~37 GB peak):
+    python3 benchmark_sorting.py --n-values 8 16 32 64 128 256 --runs 3
 """
 
 import subprocess
@@ -30,7 +32,7 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/basic/22_ckks_sorting_paper"
 
-N_VALUES_DEFAULT = [8, 16, 32, 64, 128]
+N_VALUES_DEFAULT = [8, 16, 32, 64, 128, 256]
 
 
 def run_once(binary: Path, n: int) -> dict | None:
@@ -146,7 +148,7 @@ def main() -> None:
     parser.add_argument(
         "--n-values", type=int, nargs="+", default=N_VALUES_DEFAULT,
         metavar="N",
-        help="Vector lengths to benchmark (must be powers of 2, N<=128)"
+        help="Vector lengths to benchmark (must be powers of 2, N<=256)"
     )
     parser.add_argument(
         "--runs", type=int, default=3,
@@ -168,11 +170,11 @@ def main() -> None:
         if n <= 0 or (n & (n - 1)) != 0:
             print(f"Error: N={n} is not a positive power of 2")
             sys.exit(1)
-        if n > 128:
-            print(f"Warning: N={n} requires multi-ciphertext mode "
-                  "(not yet implemented), skipping")
+        if n > 256:
+            print(f"Warning: N={n} exceeds single-CT limit of 256. "
+                  "Multi-CT sorting is infeasible on current GPUs, skipping")
 
-    n_values = [n for n in args.n_values if n <= 128]
+    n_values = [n for n in args.n_values if n <= 256]
     if not n_values:
         print("No valid N values to benchmark.")
         sys.exit(1)
