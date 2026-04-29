@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-Benchmark HE median for varying N, mimicking the experimental setup of:
+Benchmark HE ranking for varying N, mimicking the experimental setup of:
   "Efficient Ranking, Order Statistics, and Sorting under CKKS"
   Mazzone et al., USENIX Security 2025
 
+The paper tests N = 8, 16, 32, 64, 128 in single-ciphertext mode.
+For N > 128, use benchmark_ranking_multi.py (multi-ciphertext mode).
+
 Usage:
-    python3 benchmark_median.py [--n-values N1 N2 ...] [--runs R] [--output FILE]
+    python3 benchmark_ranking.py [--n-values N1 N2 ...] [--runs R] [--output FILE]
 
     # Quick test:
-    python3 benchmark_median.py --n-values 8 16 32 --runs 1
+    python3 benchmark_ranking.py --n-values 8 16 32 --runs 1
 
     # Full paper-equivalent single-ciphertext sweep (default):
-    python3 benchmark_median.py
+    python3 benchmark_ranking.py
 
     # Custom N set, 5 runs each:
-    python3 benchmark_median.py --n-values 8 16 32 64 128 --runs 5
+    python3 benchmark_ranking.py --n-values 8 16 32 64 128 --runs 5
 """
 
 import subprocess
@@ -24,13 +27,19 @@ import argparse
 import statistics
 from pathlib import Path
 
+# Default binary location relative to this script
 _SCRIPT_DIR = Path(__file__).resolve().parent
-BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/basic/20_ckks_median"
+BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/ranking_and_sorting/17_ckks_ranking_paper"
 
+# Paper's single-ciphertext N values (N^2 <= 16384 slots with poly_deg=32768)
 N_VALUES_DEFAULT = [8, 16, 32, 64, 128]
 
 
 def run_once(binary: Path, n: int) -> dict | None:
+    """
+    Run the binary for a single N in bench mode.
+    Returns a dict with keygen_ms and rank_ms, or None on failure.
+    """
     cmd = [str(binary), str(n), "--bench"]
     try:
         result = subprocess.run(
@@ -45,7 +54,8 @@ def run_once(binary: Path, n: int) -> dict | None:
               f"    stderr: {result.stderr[:300]}", file=sys.stderr)
         return None
 
-    # Format: BENCH: N=8 ctx_ms=... keygen_ms=... median_ms=... gpu_keys_mib=... gpu_median_mib=... gpu_peak_mib=...
+    # Parse the BENCH: line emitted by the C++ binary
+    # Format: BENCH: N=64 keygen_ms=1234.5 rank_ms=567.8
     for line in result.stdout.splitlines():
         if line.startswith("BENCH:"):
             data = {"n": n}
@@ -60,6 +70,7 @@ def run_once(binary: Path, n: int) -> dict | None:
 
 
 def benchmark_n(binary: Path, n: int, runs: int) -> dict | None:
+    """Run 'runs' trials for a given N and return averaged stats."""
     run_results = []
     for run_idx in range(runs):
         print(f"  run {run_idx + 1}/{runs} ...", end=" ", flush=True)
@@ -69,12 +80,12 @@ def benchmark_n(binary: Path, n: int, runs: int) -> dict | None:
             print("FAILED")
             continue
 
-        total_s = (data.get('ctx_ms', 0) + data.get('keygen_ms', 0) + data.get('median_ms', 0)) / 1000
+        total_s = (data.get('ctx_ms', 0) + data.get('keygen_ms', 0) + data.get('rank_ms', 0)) / 1000
         print(f"ctx_ms={data.get('ctx_ms', 0):.1f}  "
-              f"median_ms={data.get('median_ms', 0):.1f}  "
+              f"rank_ms={data.get('rank_ms', 0):.1f}  "
               f"total={total_s:.2f}s  "
               f"gpu_keys={data.get('gpu_keys_mib', '?')}MiB  "
-              f"gpu_median={data.get('gpu_median_mib', '?')}MiB  "
+              f"gpu_rank={data.get('gpu_rank_mib', '?')}MiB  "
               f"gpu_peak={data.get('gpu_peak_mib', '?')}MiB")
         run_results.append(data)
 
@@ -89,33 +100,34 @@ def benchmark_n(binary: Path, n: int, runs: int) -> dict | None:
         if len(vals) > 1:
             avg[f"{k}_stdev"] = statistics.stdev(vals)
 
-    avg["median_s"] = avg["median_ms"] / 1000.0
+    avg["rank_s"] = avg["rank_ms"] / 1000.0
     avg["keygen_s"] = avg["keygen_ms"] / 1000.0
-    avg["total_s"]  = (avg["ctx_ms"] + avg["keygen_ms"] + avg["median_ms"]) / 1000.0
+    avg["total_s"] = (avg["ctx_ms"] + avg["keygen_ms"] + avg["rank_ms"]) / 1000.0
     return avg
 
 
 def print_table(results: list[dict]) -> None:
     print("\n" + "=" * 125)
-    print(f"{'N':>6}  {'ctx_ms':>10}  {'keygen_ms':>12}  {'median_ms':>12}  "
-          f"{'median_s':>10}  {'total_s':>10}  {'keys_MiB':>10}  {'med_MiB':>10}  {'peak_MiB':>10}")
+    print(f"{'N':>6}  {'ctx_ms':>10}  {'keygen_ms':>12}  {'rank_ms':>12}  "
+          f"{'rank_s':>10}  {'total_s':>10}  {'keys_MiB':>10}  {'rank_MiB':>10}  {'peak_MiB':>10}")
     print("-" * 125)
     for r in results:
         cx  = r.get("ctx_ms", 0)
         ks  = r.get("keygen_ms", 0)
-        mds = r.get("median_ms", 0)
+        rs  = r.get("rank_ms", 0)
         ts  = r.get("total_s", 0)
         gk  = r.get("gpu_keys_mib", float("nan"))
-        gm  = r.get("gpu_median_mib", float("nan"))
+        gr  = r.get("gpu_rank_mib", float("nan"))
         gp  = r.get("gpu_peak_mib", float("nan"))
-        print(f"{r['n']:>6}  {cx:>10.1f}  {ks:>12.1f}  {mds:>12.1f}  "
-              f"{mds/1000:>10.3f}  {ts:>10.1f}  {gk:>10.0f}  {gm:>10.0f}  {gp:>10.0f}")
+        print(f"{r['n']:>6}  {cx:>10.1f}  {ks:>12.1f}  {rs:>12.1f}  "
+              f"{rs/1000:>10.3f}  {ts:>10.1f}  {gk:>10.0f}  {gr:>10.0f}  {gp:>10.0f}")
     print("=" * 125)
 
 
 def save_csv(results: list[dict], path: Path) -> None:
     if not results:
         return
+    # Collect all keys present across all result dicts
     all_keys = list(dict.fromkeys(k for r in results for k in r))
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=all_keys, extrasaction="ignore")
@@ -126,13 +138,13 @@ def save_csv(results: list[dict], path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Benchmark HE median for varying N",
+        description="Benchmark HE ranking for varying N",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     parser.add_argument(
         "--binary", type=Path, default=BINARY_DEFAULT,
-        help="Path to 20_ckks_median binary"
+        help="Path to 17_ckks_ranking_paper binary"
     )
     parser.add_argument(
         "--n-values", type=int, nargs="+", default=N_VALUES_DEFAULT,
@@ -145,22 +157,25 @@ def main() -> None:
     )
     parser.add_argument(
         "--output", type=Path,
-        default=_SCRIPT_DIR / "median_benchmark_results.csv",
-        help="CSV output file (default: median_benchmark_results.csv)"
+        default=_SCRIPT_DIR / "ranking_benchmark_results.csv",
+        help="CSV output file (default: ranking_benchmark_results.csv)"
     )
     args = parser.parse_args()
 
+    # Validate binary exists
     if not args.binary.exists():
         print(f"Binary not found: {args.binary}")
-        print("Build first with: cmake --build build --target 20_ckks_median")
+        print("Build first with: cmake --build build --target 17_ckks_ranking_paper")
         sys.exit(1)
 
+    # Validate N values
     for n in args.n_values:
         if n <= 0 or (n & (n - 1)) != 0:
             print(f"Error: N={n} is not a positive power of 2")
             sys.exit(1)
         if n > 128:
-            print(f"Warning: N={n} exceeds single-CT limit (128), skipping")
+            print(f"Warning: N={n} exceeds single-CT limit (128). "
+                  "Use benchmark_ranking_multi.py for N > 128, skipping")
 
     n_values = [n for n in args.n_values if n <= 128]
     if not n_values:
@@ -177,8 +192,8 @@ def main() -> None:
         result = benchmark_n(args.binary, n, args.runs)
         if result:
             all_results.append(result)
-            median_ms = result.get("median_ms", 0)
-            print(f"  → avg median: {median_ms:.1f} ms ({median_ms/1000:.3f} s)")
+            rank_ms = result.get("rank_ms", 0)
+            print(f"  → avg rank: {rank_ms:.1f} ms ({rank_ms/1000:.3f} s)")
         else:
             print(f"  → all runs failed for N={n}")
 

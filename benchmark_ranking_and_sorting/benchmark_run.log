@@ -1,0 +1,45 @@
+Binary : /home/heongpu/HEonGPU/build/bin/examples/basic/16_ckks_rotation_parallel
+N range: [8, 16, 32, 64, 128]
+Runs   : 3 per N
+
+N=8:
+  run 1/3 ... ctx_ms=63.6  rank_ms=698.6  total=0.82s
+  run 2/3 ... ctx_ms=72.5  rank_ms=695.3  total=0.82s
+  run 3/3 ... ctx_ms=71.1  rank_ms=697.0  total=0.82s
+  → avg rank: 697.0 ms (0.697 s)
+
+N=16:
+  run 1/3 ... ctx_ms=71.1  rank_ms=700.1  total=0.84s
+  run 2/3 ... ctx_ms=74.4  rank_ms=702.0  total=0.85s
+  run 3/3 ... ctx_ms=72.4  rank_ms=702.5  total=0.84s
+  → avg rank: 701.6 ms (0.702 s)
+
+N=32:
+  run 1/3 ... ctx_ms=72.5  rank_ms=710.8  total=0.87s
+  run 2/3 ... ctx_ms=72.3  rank_ms=708.3  total=0.86s
+  run 3/3 ... ctx_ms=64.0  rank_ms=711.4  total=0.86s
+  → avg rank: 710.2 ms (0.710 s)
+
+N=64:
+  run 1/3 ... ctx_ms=64.8  rank_ms=716.8  total=0.88s
+  run 2/3 ... ctx_ms=72.4  rank_ms=713.9  total=0.88s
+  run 3/3 ... ctx_ms=72.0  rank_ms=716.1  total=0.88s
+  → avg rank: 715.6 ms (0.716 s)
+
+N=128:
+  run 1/3 ... ctx_ms=71.2  rank_ms=721.5  total=0.90s
+  run 2/3 ... ctx_ms=73.1  rank_ms=719.9  total=0.90s
+  run 3/3 ... ctx_ms=64.8  rank_ms=721.3  total=0.89s
+  → avg rank: 720.9 ms (0.721 s)
+
+======================================================================================
+     N      ctx_ms     keygen_ms       rank_ms      rank_s     total_s
+--------------------------------------------------------------------------------------
+     8        69.1          55.7         697.0       0.697         0.8
+    16        72.6          68.8         701.6       0.702         0.8
+    32        69.6          81.9         710.2       0.710         0.9
+    64        69.7          95.0         715.6       0.716         0.9
+   128        69.7         108.1         720.9       0.721         0.9
+======================================================================================
+
+Results saved to /home/heongpu/HEonGPU/benchmark/ranking_benchmark_results.csv

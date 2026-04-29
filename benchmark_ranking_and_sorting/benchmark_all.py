@@ -34,7 +34,7 @@ import statistics
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_BIN_DIR    = _SCRIPT_DIR.parent / "build/bin/examples/basic"
+_BIN_DIR    = _SCRIPT_DIR.parent / "build/bin/examples/ranking_and_sorting"
 
 # Each entry: (label, binary name, timing field, extra args, max N)
 BENCHMARKS = [

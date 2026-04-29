@@ -28,7 +28,7 @@ import statistics
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/basic/23_ckks_ranking_tie_correction"
+BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/ranking_and_sorting/23_ckks_ranking_tie_correction"
 
 N_VALUES_DEFAULT = [8, 16, 32, 64, 128]
 

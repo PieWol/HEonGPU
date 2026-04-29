@@ -6,3 +6,4 @@
 add_subdirectory(basic)
 add_subdirectory(bootstrapping)
 add_subdirectory(mpc)
+add_subdirectory(ranking_and_sorting)
