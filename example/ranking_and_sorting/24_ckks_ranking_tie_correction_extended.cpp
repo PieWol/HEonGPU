@@ -274,12 +274,15 @@ int main(int argc, char* argv[])
     const int required_depth  = tie_correction ? tie_corr_depth : basic_depth;
 
     // Ring dimension selection based on slot requirement N² ≤ n/2:
-    //   N≤128: n=32768  (128²=16384=n/2)
+    //   N≤128 basic (depth≤14): n=32768  (paper-spec, handled by Tier 1/2)
+    //   N=128 tie-corr (depth=15): n=65536 (budget 881 too tight at n=32768)
     //   N=256:  n=131072 (256²=65536=n/2)
     //   N=512:  n=524288 (512²=262144=n/2)
     size_t poly_modulus_degree;
-    if (vec_len <= 128)
+    if (vec_len <= 128 && required_depth <= 14)
         poly_modulus_degree = 32768;
+    else if (vec_len <= 128)
+        poly_modulus_degree = 65536;
     else if (vec_len <= 256)
         poly_modulus_degree = 131072;
     else if (vec_len <= 512)
@@ -295,11 +298,11 @@ int main(int argc, char* argv[])
     int scale_bits;
     int available_depth;
 
-    if (poly_modulus_degree >= 131072)
+    if (poly_modulus_degree >= 65536)
     {
-        // Tier 4/5: N=256 (n=131072) or N=512 (n=524288)
-        // Q=60+15*45=735, P=13*60=780, total=1515, dnum=ceil(16/13)=2
-        // P primes must be >= max(Q prime) = 60 bits for key switching.
+        // Extended tiers: N=128 tie-corr (n=65536), N=256 (n=131072), N=512 (n=524288)
+        // Q={60,45x15}=16 primes (735 bits), P={60x13}=780 bits, total=1515
+        // dnum=ceil(16/13)=2. First Q chunk (13 primes)=60+12*45=600 <= 780 ✓
         context->set_coeff_modulus_bit_sizes(
             {60, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45},
             {60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60});
@@ -315,32 +318,14 @@ int main(int argc, char* argv[])
         scale_bits = 35;
         available_depth = 14;
     }
-    else if (required_depth <= 14)
+    else
     {
-        // Tier 2: standard large-N params (15 Q primes)
+        // Tier 2: standard large-N basic params (15 Q primes, depth 14)
         context->set_coeff_modulus_bit_sizes(
             {60, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45},
             {60, 60, 60});
         scale_bits = 45;
         available_depth = 14;
-    }
-    else if (required_depth <= 15)
-    {
-        // Tier 3: extended depth for N=128 tie correction (16 Q primes)
-        // Budget: Q=60+15*45=735, P=3*48=144, total=879 <= 881
-        context->set_coeff_modulus_bit_sizes(
-            {60, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45},
-            {48, 48, 48});
-        scale_bits = 45;
-        available_depth = 15;
-    }
-    else
-    {
-        std::cerr << "Error: N=" << vec_len
-                  << (tie_correction ? " with tie correction" : "")
-                  << " needs " << required_depth
-                  << " levels, exceeds maximum supported depth.\n";
-        return EXIT_FAILURE;
     }
 
     double scale = pow(2.0, scale_bits);
