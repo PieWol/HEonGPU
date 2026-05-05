@@ -1,3 +1,36 @@
+/**
+ * Extended single-ciphertext ranking with tie correction (beyond paper spec).
+ *
+ * This file extends the ranking implementation from the paper
+ * (Mazzone et al., "Efficient Ranking, Order Statistics, and Sorting under
+ * CKKS", USENIX Security 2025) to larger input sizes by increasing the CKKS
+ * ring dimension. The paper's setup (n=32768) limits single-ciphertext ranking
+ * to N<=128 basic and N<=64 tie-corrected. By using larger ring dimensions we
+ * push single-ciphertext tie-corrected ranking to N=128, 256, and 512.
+ *
+ * Relationship to other files:
+ *
+ *   23_ckks_ranking_tie_correction.cpp
+ *     Paper-spec ranking with optional tie correction. Fixed n=32768.
+ *     Basic up to N=128, tie-corrected up to N=64. Used by
+ *     benchmark_ranking.py and benchmark_ranking_tie_correction.py.
+ *
+ *   24_ckks_ranking_tie_correction_extended.cpp (this file)
+ *     Extends beyond paper spec using adaptive ring dimensions:
+ *       N=128 tie-corr: n=65536   (budget 1761, paper can't fit depth 15)
+ *       N=256:          n=131072  (budget 3500)
+ *       N=512:          n=524288  (budget 14000, experimental, ~28GB VRAM)
+ *     Demonstrates GPU advantage at scale — the thesis extension showing
+ *     that GPU parallelism dominates at larger ring dimensions where CPU
+ *     wall-clock time rises significantly.
+ *
+ * Usage:
+ *   ./24_ckks_ranking_tie_correction_extended [N] [--tie-correction]
+ *       [--no-tie-correction] [--ties] [--bench]
+ *
+ *   N defaults to 128. Tie correction is enabled by default.
+ */
+
 #include <heongpu/heongpu.hpp>
 #include <heongpu/host/ckks/chebyshev_interpolation.cuh>
 #include "../example_util.h"

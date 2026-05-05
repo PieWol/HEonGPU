@@ -1,9 +1,6 @@
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${BINARY_LOCATION}/examples/ranking_and_sorting)
 
 set(EXECUTABLES
-    16_ckks_ranking 16_ckks_ranking.cpp
-    17_ckks_ranking_paper 17_ckks_ranking_paper.cpp
-    18_ckks_sorting 18_ckks_sorting.cpp
     19_ckks_minimum 19_ckks_minimum.cpp
     20_ckks_median  20_ckks_median.cpp
     21_ckks_ranking_multi 21_ckks_ranking_multi.cpp
