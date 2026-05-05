@@ -4,6 +4,7 @@
 # Developer: Alişah Özcan
 
 cmake_minimum_required(VERSION 3.26.4 FATAL_ERROR)
+set(CMAKE_CUDA_ARCHITECTURES 86)
 project(HEonGPU VERSION 1.1 LANGUAGES C CXX CUDA ASM)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -37,35 +38,8 @@ find_package(OpenMP REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
 
-message(STATUS "CUDA Version: ${CUDAToolkit_VERSION}")
-if(OpenMP_CXX_VERSION)
-    message(STATUS "OpenMP Version: ${OpenMP_CXX_VERSION}")
-endif()
-if(ZLIB_VERSION_STRING)
-    message(STATUS "ZLIB Version: ${ZLIB_VERSION_STRING}")
-endif()
-if(OPENSSL_VERSION)
-    message(STATUS "OpenSSL Version: ${OPENSSL_VERSION}")
-endif()
-
-set(HEONGPU_CUDA_ARCH_AUTO_DETECTED OFF CACHE BOOL "Set to ON when HEonGPU auto-detects CUDA arch")
-set(CMAKE_CUDA_ARCHITECTURES 89 CACHE STRING "CUDA GPU architectures" FORCE)
-set(HEONGPU_CUDA_ARCH_FORCE_MANUAL ON CACHE BOOL "Set to ON to prevent HEonGPU from auto-detecting CUDA arch")
-if(NOT HEONGPU_CUDA_ARCH_FORCE_MANUAL AND (NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "" OR CMAKE_CUDA_ARCHITECTURES STREQUAL "native" OR CMAKE_CUDA_ARCHITECTURES STREQUAL "52" OR HEONGPU_CUDA_ARCH_AUTO_DETECTED))
-    include(cmake/DetectCudaArch.cmake)
-    heongpu_detect_cuda_arch(HEONGPU_DETECTED_CUDA_ARCH)
-    if(HEONGPU_DETECTED_CUDA_ARCH)
-        set(CMAKE_CUDA_ARCHITECTURES "${HEONGPU_DETECTED_CUDA_ARCH}" CACHE STRING "CUDA GPU architectures" FORCE)
-        set(HEONGPU_CUDA_ARCH_AUTO_DETECTED ON CACHE BOOL "Set to ON when HEonGPU auto-detects CUDA arch" FORCE)
-        message(STATUS "Auto-detected CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES} for HEonGPU")
-    else()
-        set(CMAKE_CUDA_ARCHITECTURES native CACHE STRING "CUDA GPU architectures" FORCE)
-        set(HEONGPU_CUDA_ARCH_AUTO_DETECTED ON CACHE BOOL "Set to ON when HEonGPU auto-detects CUDA arch" FORCE)
-        message(WARNING "CUDA arch auto-detection failed; falling back to CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}")
-    endif()
-else()
-    set(HEONGPU_CUDA_ARCH_AUTO_DETECTED OFF CACHE BOOL "Set to ON when HEonGPU auto-detects CUDA arch" FORCE)
-    message(STATUS "Setting CMAKE_CUDA_ARCHITECTURES to ${CMAKE_CUDA_ARCHITECTURES} for HEonGPU")
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 86)
 endif()
 
 ##################
@@ -139,6 +113,8 @@ endif()
 # Examples #
 ############
 
+option(HEonGPU_BUILD_EXAMPLES "Build HEonGPU Examples" ON)
+message(STATUS "HEonGPU_BUILD_EXAMPLES: ${HEonGPU_BUILD_EXAMPLES}")
 if(HEonGPU_BUILD_EXAMPLES)
     add_subdirectory(example)
 endif()
