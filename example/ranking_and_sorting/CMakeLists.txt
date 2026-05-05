@@ -9,6 +9,7 @@ set(EXECUTABLES
     21_ckks_ranking_multi 21_ckks_ranking_multi.cpp
     22_ckks_sorting_paper 22_ckks_sorting_paper.cpp
     23_ckks_ranking_tie_correction 23_ckks_ranking_tie_correction.cpp
+    24_ckks_ranking_tie_correction_extended 24_ckks_ranking_tie_correction_extended.cpp
 )
 
 function(add_example exe source)
