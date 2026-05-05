@@ -38,6 +38,10 @@ namespace heongpu
                 return 1761;
             case 131072:
                 return 3500;
+            case 262144:
+                return 7000;
+            case 524288:
+                return 14000;
         }
         return 0;
     }
@@ -59,6 +63,10 @@ namespace heongpu
                 return 1212;
             case 131072:
                 return 2400;
+            case 262144:
+                return 4800;
+            case 524288:
+                return 9600;
         }
         return 0;
     }
@@ -80,6 +88,10 @@ namespace heongpu
                 return 930;
             case 131072:
                 return 1860;
+            case 262144:
+                return 3720;
+            case 524288:
+                return 7440;
         }
         return 0;
     }

@@ -255,9 +255,15 @@ int main(int argc, char* argv[])
     //     Total bits: 735+144=879 <= 881 ✓
     //
     //   Tier 4 (N=256, n=131072, budget=3500):
-    //     Q={60,45x15}=16 primes, P={45x16}, scale=45, dnum=1
-    //     Total bits: 735+720=1455 <= 3500 ✓
-    //     N²=65536 = n/2 (exact fit). dnum=1 → minimal key sizes.
+    //     Q={60,45x15}=16 primes, P={60x13}, scale=45, dnum=2
+    //     Total bits: 735+780=1515 <= 3500 ✓
+    //     N²=65536 = n/2 (exact fit).
+    //
+    //   Tier 5 (N=512, n=524288, budget=14000):
+    //     Q={60,45x15}=16 primes, P={60x13}, scale=45, dnum=2
+    //     Total bits: 735+780=1515 <= 14000 ✓
+    //     N²=262144 = n/2 (exact fit). Experimental — requires ~2GB+ per ciphertext.
+    //     Security budget extrapolated from lattice-estimator linear trend.
     //
     heongpu::HEContext<Scheme> context = heongpu::GenHEContext<Scheme>();
 
@@ -267,21 +273,36 @@ int main(int argc, char* argv[])
     const int tie_corr_depth  = compare_depth + 4;
     const int required_depth  = tie_correction ? tie_corr_depth : basic_depth;
 
-    // N=256 requires n=131072 for slot capacity (256²=65536=n/2)
-    const bool needs_large_ring = (vec_len > 128);
-    const size_t poly_modulus_degree = needs_large_ring ? 131072 : 32768;
+    // Ring dimension selection based on slot requirement N² ≤ n/2:
+    //   N≤128: n=32768  (128²=16384=n/2)
+    //   N=256:  n=131072 (256²=65536=n/2)
+    //   N=512:  n=524288 (512²=262144=n/2)
+    size_t poly_modulus_degree;
+    if (vec_len <= 128)
+        poly_modulus_degree = 32768;
+    else if (vec_len <= 256)
+        poly_modulus_degree = 131072;
+    else if (vec_len <= 512)
+        poly_modulus_degree = 524288;
+    else
+    {
+        std::cerr << "Error: N=" << vec_len
+                  << " exceeds maximum supported size (512).\n";
+        return EXIT_FAILURE;
+    }
     context->set_poly_modulus_degree(poly_modulus_degree);
 
     int scale_bits;
     int available_depth;
 
-    if (needs_large_ring)
+    if (poly_modulus_degree >= 131072)
     {
-        // Tier 4: N=256, n=131072, budget=3500 bits
-        // Q=60+15*45=735, P=16*45=720, total=1455 <= 3500, dnum=1
+        // Tier 4/5: N=256 (n=131072) or N=512 (n=524288)
+        // Q=60+15*45=735, P=13*60=780, total=1515, dnum=ceil(16/13)=2
+        // P primes must be >= max(Q prime) = 60 bits for key switching.
         context->set_coeff_modulus_bit_sizes(
             {60, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45},
-            {45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45});
+            {60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60});
         scale_bits = 45;
         available_depth = 15;
     }
@@ -354,7 +375,10 @@ int main(int argc, char* argv[])
                   << "  depth=" << required_depth << "/" << available_depth
                   << "  n=" << poly_modulus_degree
                   << "\n";
-        if (needs_large_ring)
+        if (poly_modulus_degree == 524288)
+            std::cout << "Tier 5: Q={60,45x15}, P={45x16}, "
+                      << "scale=2^45, dnum=1 (EXPERIMENTAL)\n";
+        else if (poly_modulus_degree == 131072)
             std::cout << "Tier 4: Q={60,45x15}, P={45x16}, "
                       << "scale=2^45, dnum=1\n";
         else if (vec_len <= 32)
