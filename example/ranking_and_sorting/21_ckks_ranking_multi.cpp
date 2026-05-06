@@ -8,7 +8,7 @@
  * Both modes use block size L=128.  M = N/L block ciphertexts.
  *
  * Comparison method (paper §6.1):
- *   M ≤ 2 (N ≤ 256): Chebyshev (degree 2047 basic, 4095 TC)
+ *   M ≤ 2 (N ≤ 256): Chebyshev degree 4095
  *   M > 2 (N > 256):  f,g composition (dg=3, df=2)
  *
  * Ring dimension and dnum are auto-selected via selectMultiCTParams()
@@ -17,7 +17,7 @@
  *
  * Parameter table (128-bit security):
  *
- *   Basic + Cheby 2047:  n=65536   Q={60,45×14}  P={60×17}  dnum=1
+ *   Basic + Cheby 4095:  n=65536   Q={60,45×15}  P={60×17}  dnum=1
  *   Basic + f,g:         n=131072  Q={60,45×24}  P={60×39}  dnum=1
  *   TC + Cheby 4095:     n=65536   Q={60,45×15}  P={60×17}  dnum=1
  *   TC + f,g:            n=131072  Q={60,45×27}  P={60×37}  dnum=1
@@ -84,9 +84,9 @@ static CKKSParams selectMultiCTParams(bool tie_correction, bool use_fg)
         // Q={60,45×24}=1140, P={60×39}=2340, total=3480 ≤ 3500
         return {131072, make_q(60, 45, 24), std::vector<int>(39, 60), 45, 1};
     }
-    // Basic + Cheby 2047: depth=14, n=65536 (budget 1761) → dnum=1
-    // Q={60,45×14}=690, P={60×17}=1020, total=1710 ≤ 1761
-    return {65536, make_q(60, 45, 14), std::vector<int>(17, 60), 45, 1};
+    // Basic + Cheby 4095: depth=15, n=65536 (budget 1761) → dnum=1
+    // Q={60,45×15}=735, P={60×17}=1020, total=1755 ≤ 1761
+    return {65536, make_q(60, 45, 15), std::vector<int>(17, 60), 45, 1};
 }
 
 // ---------------------------------------------------------------------------
@@ -688,7 +688,7 @@ int main(int argc, char* argv[])
     // ── HE context ──────────────────────────────────────────────────────────
     const bool use_fg = (M > 2);
     const int fg_dg = 3, fg_df = 2;
-    const int cheby_degree = tie_correction ? 4095 : 2047;
+    const int cheby_degree = 4095;
 
     CKKSParams params = selectMultiCTParams(tie_correction, use_fg);
     double scale = std::pow(2.0, params.scale_bits);
