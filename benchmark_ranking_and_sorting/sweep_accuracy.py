@@ -37,8 +37,10 @@ def run_once(binary: Path, n: int, tie_correction: bool) -> dict | None:
     cmd = [str(binary), str(n), "--bench"]
     if tie_correction:
         cmd.append("--tie-correction")
+    repo_root = _SCRIPT_DIR.parent
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,
+                                cwd=str(repo_root))
     except subprocess.TimeoutExpired:
         return {"n": n, "mode": "tc" if tie_correction else "basic", "status": "TIMEOUT"}
 

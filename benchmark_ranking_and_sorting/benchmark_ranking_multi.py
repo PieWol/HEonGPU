@@ -33,8 +33,10 @@ def run_once(binary: Path, n: int, tie_correction: bool) -> dict | None:
     cmd = [str(binary), str(n), "--bench"]
     if tie_correction:
         cmd.append("--tie-correction")
+    repo_root = _SCRIPT_DIR.parent
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200,
+                                cwd=str(repo_root))
     except subprocess.TimeoutExpired:
         print(f"  TIMEOUT for N={n}", file=sys.stderr)
         return None
