@@ -8,19 +8,19 @@
  * Both modes use block size L=128.  M = N/L block ciphertexts.
  *
  * Comparison method (paper §6.1):
- *   M ≤ 2 (N ≤ 256): Chebyshev degree 2047
+ *   M ≤ 2 (N ≤ 256): Chebyshev (degree 2047 basic, 4095 TC)
  *   M > 2 (N > 256):  f,g composition (dg=3, df=2)
  *
  * Ring dimension and dnum are auto-selected via selectMultiCTParams()
  * to minimise key-switching noise (mimicking OpenFHE's ringDim=0).
- * TC modes target dnum=1 by using a larger ring dimension.
+ * All modes target dnum=1 for maximum accuracy.
  *
  * Parameter table (128-bit security):
  *
- *   Basic + Cheby 2047:  n=32768   Q={60,45×14}  P={60×3}   dnum=5
- *   Basic + f,g:         n=65536   Q={60,45×22}  P={60×11}  dnum=3
- *   TC + Cheby 2047:     n=65536   Q={60,45×15}  P={60×17}  dnum=1
- *   TC + f,g:            n=131072  Q={60,45×24}  P={60×39}  dnum=1
+ *   Basic + Cheby 2047:  n=65536   Q={60,45×14}  P={60×17}  dnum=1
+ *   Basic + f,g:         n=131072  Q={60,45×24}  P={60×39}  dnum=1
+ *   TC + Cheby 4095:     n=65536   Q={60,45×15}  P={60×17}  dnum=1
+ *   TC + f,g:            n=131072  Q={60,45×27}  P={60×37}  dnum=1
  *
  * Tie-correction algorithm (same as 23_ckks_ranking_tie_correction.cpp):
  *   E = 1 − sign²  (equality indicator)
@@ -68,25 +68,25 @@ static CKKSParams selectMultiCTParams(bool tie_correction, bool use_fg)
 
     if (tie_correction && use_fg)
     {
-        // TC + f,g: depth 23, n=131072 (budget 3500) → dnum=1
-        // Q={60,45×24}=1140, P={60×39}=2340, total=3480 ≤ 3500
-        return {131072, make_q(60, 45, 24), std::vector<int>(39, 60), 45, 1};
+        // TC + f,g: depth=27 (paper: 4*(3+2)+3+1+3), n=131072 (budget 3500) → dnum=1
+        // Q={60,45×27}=1275, P={60×37}=2220, total=3495 ≤ 3500
+        return {131072, make_q(60, 45, 27), std::vector<int>(37, 60), 45, 1};
     }
     if (tie_correction)
     {
-        // TC + Cheby 2047: depth 14, n=65536 (budget 1761) → dnum=1
+        // TC + Cheby 4095: depth=15, n=65536 (budget 1761) → dnum=1
         // Q={60,45×15}=735, P={60×17}=1020, total=1755 ≤ 1761
         return {65536, make_q(60, 45, 15), std::vector<int>(17, 60), 45, 1};
     }
     if (use_fg)
     {
-        // Basic + f,g: depth 22, n=65536 (budget 1761) → dnum=3
-        // Q={60,45×22}=1050, P={60×11}=660, total=1710 ≤ 1761
-        return {65536, make_q(60, 45, 22), std::vector<int>(11, 60), 45, 3};
+        // Basic + f,g: depth=24 (paper: 4*(3+2)+3+1), n=131072 (budget 3500) → dnum=1
+        // Q={60,45×24}=1140, P={60×39}=2340, total=3480 ≤ 3500
+        return {131072, make_q(60, 45, 24), std::vector<int>(39, 60), 45, 1};
     }
-    // Basic + Cheby 2047: depth 13, n=32768 (budget 881) → dnum=5
-    // Q={60,45×14}=690, P={60×3}=180, total=870 ≤ 881
-    return {32768, make_q(60, 45, 14), {60, 60, 60}, 45, 5};
+    // Basic + Cheby 2047: depth=14, n=65536 (budget 1761) → dnum=1
+    // Q={60,45×14}=690, P={60×17}=1020, total=1710 ≤ 1761
+    return {65536, make_q(60, 45, 14), std::vector<int>(17, 60), 45, 1};
 }
 
 // ---------------------------------------------------------------------------
@@ -688,7 +688,7 @@ int main(int argc, char* argv[])
     // ── HE context ──────────────────────────────────────────────────────────
     const bool use_fg = (M > 2);
     const int fg_dg = 3, fg_df = 2;
-    const int cheby_degree = 2047;
+    const int cheby_degree = tie_correction ? 4095 : 2047;
 
     CKKSParams params = selectMultiCTParams(tie_correction, use_fg);
     double scale = std::pow(2.0, params.scale_bits);
@@ -708,7 +708,7 @@ int main(int argc, char* argv[])
                   << "  L=" << L
                   << "  mode=" << (tie_correction ? "tie-corrected" : "basic") << "\n";
         std::cout << "Compare method: "
-                  << (use_fg ? "f,g (dg=3, df=2)" : "Chebyshev 2047")
+                  << (use_fg ? "f,g (dg=3, df=2)" : ("Chebyshev " + std::to_string(cheby_degree)))
                   << "  n=" << params.poly_modulus_degree
                   << "  scale=2^" << params.scale_bits
                   << "  dnum=" << params.dnum << "\n";
@@ -853,6 +853,22 @@ int main(int argc, char* argv[])
         }
     }
 
+    // ── Compute max error over ALL elements ────────────────────────────────
+    std::vector<double> expected_ranks = tie_correction
+        ? computeOrdinalRanks(input)
+        : computeFractionalRanks(input);
+    double max_err = 0.0;
+    int mismatches = 0;
+    for (int i = 0; i < N; i++)
+    {
+        double err = std::abs(all_ranks[i] - expected_ranks[i]);
+        if (err > max_err) max_err = err;
+        double rounded = tie_correction
+            ? std::round(all_ranks[i])
+            : std::round(all_ranks[i] * 2.0) / 2.0;
+        if (std::abs(rounded - expected_ranks[i]) > 0.01) mismatches++;
+    }
+
     // ── Output ───────────────────────────────────────────────────────────────
     if (bench_mode)
     {
@@ -864,7 +880,9 @@ int main(int argc, char* argv[])
                   << " rank_ms="      << rank_ms
                   << " gpu_keys_mib=" << gpu_keys_mib
                   << " gpu_rank_mib=" << gpu_rank_mib
-                  << " gpu_peak_mib=" << gpu_peak_mib << "\n";
+                  << " gpu_peak_mib=" << gpu_peak_mib
+                  << " max_err="      << max_err
+                  << " mismatches="   << mismatches << "\n";
     }
     else
     {
@@ -875,12 +893,7 @@ int main(int argc, char* argv[])
         std::cout << "Ranks (first 8): ";
         display_vector(all_ranks, std::min(N, 8));
 
-        std::vector<double> expected_ranks = tie_correction
-            ? computeOrdinalRanks(input)
-            : computeFractionalRanks(input);
-
         std::cout << "\nVerification:\n";
-        double max_err = 0.0;
         std::vector<int> show_indices;
         for (int i = 0; i < std::min(N, 8); i++) show_indices.push_back(i);
         if (N > L + 2)
@@ -898,16 +911,13 @@ int main(int argc, char* argv[])
         for (int i : show_indices)
         {
             if (prev >= 0 && i > prev + 1) std::cout << "  ...\n";
-            double expected = expected_ranks[i];
-            double actual   = all_ranks[i];
-            double err      = std::abs(actual - expected);
-            if (err > max_err) max_err = err;
-            std::cout << "  [" << i << "] expected=" << expected
-                      << "  actual=" << actual
-                      << "  err=" << err << "\n";
+            std::cout << "  [" << i << "] expected=" << expected_ranks[i]
+                      << "  actual=" << all_ranks[i]
+                      << "  err=" << std::abs(all_ranks[i] - expected_ranks[i]) << "\n";
             prev = i;
         }
-        std::cout << "Max error: " << max_err << (max_err < 1.5 ? " (OK)" : " (HIGH)") << "\n";
+        std::cout << "Max error: " << max_err << (max_err < 1.5 ? " (OK)" : " (HIGH)")
+                  << "  Mismatches: " << mismatches << "/" << N << "\n";
 
         std::cout << "\nTiming:\n";
         std::cout << "  Context gen : " << ctx_ms    << " ms\n";
