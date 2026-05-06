@@ -5,31 +5,31 @@
  *   "Efficient Ranking, Order Statistics, and Sorting under CKKS"
  *   Mazzone et al., USENIX Security 2025  (Algorithm 7, complOpt=true)
  *
- * Supports two modes:
- *   Basic:          L=128, N must be a multiple of 128
- *   Tie-corrected:  L=64,  N must be a multiple of 64
- *
- * Each ciphertext holds L×L slots.  M = N/L block ciphertexts.
+ * Both modes use block size L=128.  M = N/L block ciphertexts.
  *
  * Comparison method (paper §6.1):
- *   Basic mode:
- *     N ≤ 256 (M ≤ 2): Chebyshev degree 2047, n=32768, scale=2^45
- *     N > 256 (M > 2):  f,g composition (dg=3, df=2), n=65536, scale=2^45
- *   Tie-corrected mode (N ≤ 256 only):
- *     Chebyshev degree 1023 (compareDepth=10), n=32768, scale=2^45
+ *   M ≤ 2 (N ≤ 256): Chebyshev degree 2047
+ *   M > 2 (N > 256):  f,g composition (dg=3, df=2)
+ *
+ * Ring dimension:
+ *   Basic mode:          n=32768 (M ≤ 2), n=65536 (M > 2)
+ *   Tie-corrected mode:  n=65536 always (TC ops need extra depth)
  *
  * Depth budget — basic (Chebyshev, n=32768):
- *   TransR(1) + mod_drop(1) + Cheby(11) + maskC(1) = 14
+ *   TransR(1) + Cheby(11) + maskC(1) = 13 consumed, D=14
  *   Q={60, 45×14}, P={60×3}, total=870 < 881, dnum=5
  *
- * Depth budget — tie-corrected (Chebyshev, n=32768):
- *   TransR(1) + mod_drop(1) + Cheby(10) + sign²(1) + mask·E(1) = 14
- *   Same Q/P as basic.  The 2 TC levels replace the headroom from
- *   the lower Chebyshev degree (1023 vs 2047).
- *
  * Depth budget — basic (f,g, n=65536):
- *   TransR(1) + mod_drop(1) + fg(4×5=20) + maskC(1) = 23
+ *   TransR(1) + fg(20) + maskC(1) = 22 consumed, D=22
  *   Q={60, 45×22}, P={60×11}, total=1710 < 1761, dnum=3
+ *
+ * Depth budget — TC (Chebyshev, n=65536):
+ *   TransR(1) + Cheby(11) + sign²(1) + mask·E(1) = 14 consumed, D=15
+ *   Q={60, 45×15}, P={60×13}, total=1515 < 1761, dnum=2
+ *
+ * Depth budget — TC (f,g, n=65536):
+ *   TransR(1) + fg(20) + sign²(1) + mask·E(1) = 23 consumed, D=24
+ *   Q={60, 45×24}, P={60×10}, total=1740 < 1761, dnum=3
  *
  * Tie-correction algorithm (same as 23_ckks_ranking_tie_correction.cpp):
  *   E = 1 − sign²  (equality indicator)
@@ -627,8 +627,7 @@ int main(int argc, char* argv[])
     }
     g_verbose = !bench_mode;
 
-    // Block size: 128 for basic, 64 for tie-corrected
-    const int L = tie_correction ? 64 : 128;
+    const int L = 128;
 
     if (N <= 0 || (N & (N - 1)) != 0)
     {
@@ -646,44 +645,54 @@ int main(int argc, char* argv[])
                   << "; use 23_ckks_ranking_tie_correction for single-ciphertext mode.\n";
         return EXIT_FAILURE;
     }
-    if (tie_correction && N > 256)
-    {
-        std::cerr << "Error: tie correction limited to N <= 256 (Chebyshev regime).\n";
-        return EXIT_FAILURE;
-    }
-
     const int M = N / L;
 
     cudaSetDevice(0);
 
     // ── HE context ──────────────────────────────────────────────────────────
-    // Basic:  Chebyshev 2047 for N<=256, f,g for N>256.
-    // TC:     Chebyshev 1023 (compareDepth=10), N<=256 only.
-    //         The 2 extra TC levels (sign² + mask·E) consume the headroom
-    //         from the lower Chebyshev degree (10 vs 11).
-    const bool use_fg = (!tie_correction && M > 2);
+    // Chebyshev 2047 for M≤2, f,g composition for M>2 (both modes).
+    // TC always uses n=65536 to fit degree 2047 + TC ops (sign², mask·E).
+    const bool use_fg = (M > 2);
     const int fg_dg = 3, fg_df = 2;
-    const int cheby_degree = tie_correction ? 1023 : 2047;
+    const int cheby_degree = 2047;
 
     size_t poly_modulus_degree;
-    int scale_bits;
+    int scale_bits = 45;
     std::vector<int> q_bits, p_bits;
 
-    if (!use_fg)
-    {
-        poly_modulus_degree = 32768;
-        scale_bits = 45;
-        q_bits = {60};
-        for (int i = 0; i < 14; i++) q_bits.push_back(45);
-        p_bits = {60, 60, 60};
-    }
-    else
+    if (tie_correction)
     {
         poly_modulus_degree = 65536;
-        scale_bits = 45;
+        if (use_fg)
+        {
+            // TC + f,g: D=24, Q={60,45×24}=25, P={60×10}, 1740<1761, dnum=3
+            q_bits = {60};
+            for (int i = 0; i < 24; i++) q_bits.push_back(45);
+            p_bits.assign(10, 60);
+        }
+        else
+        {
+            // TC + Cheby 2047: D=15, Q={60,45×15}=16, P={60×13}, 1515<1761, dnum=2
+            q_bits = {60};
+            for (int i = 0; i < 15; i++) q_bits.push_back(45);
+            p_bits.assign(13, 60);
+        }
+    }
+    else if (use_fg)
+    {
+        // Basic + f,g: D=22, Q={60,45×22}=23, P={60×11}, 1710<1761, dnum=3
+        poly_modulus_degree = 65536;
         q_bits = {60};
         for (int i = 0; i < 22; i++) q_bits.push_back(45);
         p_bits.assign(11, 60);
+    }
+    else
+    {
+        // Basic + Cheby 2047: D=14, Q={60,45×14}=15, P={60×3}, 870<881, dnum=5
+        poly_modulus_degree = 32768;
+        q_bits = {60};
+        for (int i = 0; i < 14; i++) q_bits.push_back(45);
+        p_bits = {60, 60, 60};
     }
     double scale = std::pow(2.0, scale_bits);
 
@@ -702,7 +711,7 @@ int main(int argc, char* argv[])
                   << "  L=" << L
                   << "  mode=" << (tie_correction ? "tie-corrected" : "basic") << "\n";
         std::cout << "Compare method: "
-                  << (use_fg ? "f,g (dg=3, df=2)" : (tie_correction ? "Chebyshev 1023" : "Chebyshev 2047"))
+                  << (use_fg ? "f,g (dg=3, df=2)" : "Chebyshev 2047")
                   << "  n=" << poly_modulus_degree
                   << "  scale=2^" << scale_bits << "\n";
     }

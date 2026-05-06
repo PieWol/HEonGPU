@@ -2,7 +2,8 @@
 """
 Benchmark multi-ciphertext HE ranking for large N.
 
-Supports both basic (B=128) and tie-corrected (B=64) modes.
+Both basic and tie-corrected modes use B=128 blocks.
+TC mode uses extended ring dimension (n=65536) for degree 2047 + TC ops.
 
 Usage:
     # Basic ranking (default):
@@ -10,8 +11,8 @@ Usage:
     python3 benchmark_ranking_multi.py --n-values 256 --runs 1  # quick test
 
     # Tie-corrected ranking:
-    python3 benchmark_ranking_multi.py --tie-correction                     # N=[128,256], 3 runs
-    python3 benchmark_ranking_multi.py --tie-correction --n-values 128 256  # explicit N
+    python3 benchmark_ranking_multi.py --tie-correction                     # N=[256,512], 3 runs
+    python3 benchmark_ranking_multi.py --tie-correction --n-values 256 512  # explicit N
 """
 
 import subprocess
@@ -25,7 +26,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/ranking_and_sorting/21_ckks_ranking_multi"
 
 N_VALUES_BASIC = [256, 512]
-N_VALUES_TC    = [128, 256]
+N_VALUES_TC    = [256, 512]
 
 
 def run_once(binary: Path, n: int, tie_correction: bool) -> dict | None:
@@ -134,7 +135,7 @@ def main() -> None:
                         help="CSV output file (default: auto-named)")
     args = parser.parse_args()
 
-    block_size = 64 if args.tie_correction else 128
+    block_size = 128
     n_defaults = N_VALUES_TC if args.tie_correction else N_VALUES_BASIC
     n_values = args.n_values if args.n_values else n_defaults
 
@@ -155,8 +156,6 @@ def main() -> None:
             print(f"Warning: N={n} is not a multiple of {block_size}, skipping")
         elif n <= block_size:
             print(f"Warning: N={n} <= {block_size}; use single-CT benchmark, skipping")
-        elif args.tie_correction and n > 256:
-            print(f"Warning: N={n} > 256; TC not supported for multi-CT, skipping")
         else:
             valid.append(n)
 
@@ -164,7 +163,7 @@ def main() -> None:
         print("No valid N values.")
         sys.exit(1)
 
-    mode_str = "tie-corrected (B=64)" if args.tie_correction else "basic (B=128)"
+    mode_str = "tie-corrected (B=128, n=65536)" if args.tie_correction else "basic (B=128)"
     print(f"Binary : {args.binary}")
     print(f"Mode   : {mode_str}")
     print(f"N range: {valid}")
