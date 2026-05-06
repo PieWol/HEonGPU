@@ -51,8 +51,32 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <fstream>
 
 static bool g_verbose = true;
+
+static std::vector<double> loadPoints1D(int n)
+{
+    for (const char* path : {"data/points1d.csv", "../data/points1d.csv",
+                             "example/ranking_and_sorting/data/points1d.csv"})
+    {
+        std::ifstream f(path);
+        if (!f.is_open()) continue;
+        std::vector<double> v;
+        v.reserve(n);
+        std::string line;
+        while (std::getline(f, line) && static_cast<int>(v.size()) < n)
+        {
+            try { v.push_back(std::stod(line)); }
+            catch (...) {}
+        }
+        if (static_cast<int>(v.size()) == n) return v;
+    }
+    std::cerr << "Warning: points1d.csv not found, using sequential input\n";
+    std::vector<double> v(n);
+    for (int i = 0; i < n; i++) v[i] = static_cast<double>(i);
+    return v;
+}
 constexpr auto Scheme = heongpu::Scheme::CKKS;
 
 // ---------------------------------------------------------------------------
@@ -619,18 +643,8 @@ int main(int argc, char* argv[])
         std::cout << "Key generation: " << keygen_ms
                   << " ms  (" << gpu_keys_mib << " MiB VRAM)\n";
 
-    // Input
-    std::vector<double> input(N);
-    if (bench_mode)
-    {
-        std::mt19937 rng(42);
-        std::uniform_real_distribution<double> dist(0.0, 100.0);
-        for (int i = 0; i < N; i++) input[i] = dist(rng);
-    }
-    else
-    {
-        for (int i = 0; i < N; i++) input[i] = static_cast<double>(N - 1 - i);
-    }
+    // Input (same CSV as OpenFHE reference)
+    std::vector<double> input = loadPoints1D(N);
 
     // Expected median: average of two middle values for even N
     std::vector<double> input_sorted = input;

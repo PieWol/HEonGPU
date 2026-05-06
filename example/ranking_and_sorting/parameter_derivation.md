@@ -98,12 +98,19 @@ target approximation quality.
 
 ### Block sizes
 
-| Algorithm | single-CT block | multi-CT block L |
-|---|---|---|
-| Ranking | N (vector length) | 128 |
-| Sorting | N (vector length) | 256 |
-| Minimum | N (vector length) | 128 (Cheby) / 256 (f,g) |
-| Median  | N (vector length) | 256 |
+| Algorithm | single-CT block | multi-CT block L | HEonGPU scope |
+|---|---|---|---|
+| Ranking | N (vector length) | 128 | single-CT + multi-CT |
+| Sorting | N (vector length) | 256 | single-CT only |
+| Minimum | N (vector length) | 128 (Cheby) / 256 (f,g) | single-CT only |
+| Median  | N (vector length) | 256 | single-CT only |
+
+**Multi-CT scope**: The reference implements multi-CT variants of all four
+algorithms. HEonGPU implements multi-CT only for ranking (21\_). Sorting,
+minimum, and median multi-CT paths all require deep f,g composition at 59-bit
+scale, resulting in very high depth (49–57 levels), large ring dimensions,
+and high dnum — where the fixed-scale vs FLEXIBLEAUTO accuracy gap is largest.
+These are omitted as a consistent scope decision.
 
 ---
 
