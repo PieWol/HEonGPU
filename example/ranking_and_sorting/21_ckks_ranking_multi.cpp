@@ -7,16 +7,17 @@
  *
  * Both modes use block size L=128.  M = N/L block ciphertexts.
  *
- * Comparison method (paper §6.1, depth2degree mapping):
- *   M ≤ 2 (N ≤ 256): Chebyshev degree 1007 (basic, depth=11) / 2031 (TC, depth=12)
- *   M > 2 (N > 256):  f,g composition (dg=3, df=2)
+ * Comparison method (paper §6.1, compensated for fixed-scale CKKS):
+ *   Basic, M ≤ 2 (N ≤ 256): Chebyshev degree 2047 (compensated; paper: 1007)
+ *   Basic, M > 2 (N > 256):  f,g composition (dg=3, df=2)
+ *   TC (all N):               f,g composition (sign saturation needed for E=1−sign²)
  *
  * All modes use n=131072 (budget=3500) for precision headroom when
  * accumulating sign results across M*(M+1)/2 block comparisons.
  *
  * Parameter table (128-bit security, dnum=1 throughout):
  *
- *   Basic Cheby:  Q={60,45×13}  P={60×47}  depth=13 (compareDepth=11 + 2)
+ *   Basic Cheby:  Q={60,45×14}  P={60×46}  depth=14 (compareDepth=12 + 2)
  *   TC Cheby:     Q={60,45×17}  P={60×44}  depth=17 (compareDepth=12 + 2 + 3)
  *   Basic f,g:    Q={60,45×24}  P={60×39}  depth=24 (4*(3+2)+3+1)
  *   TC f,g:       Q={60,45×27}  P={60×37}  depth=27 (24+3)
@@ -66,9 +67,10 @@ static CKKSParams selectMultiCTParams(bool tie_correction, bool use_fg)
         return q;
     };
 
-    // Chebyshev cases (M≤2): match paper's exact compareDepth.
-    //   Basic: compareDepth=11, degree=1007, depth=13 (11+2)
-    //   TC:    compareDepth=12, degree=2031, depth=17 (12+2+3)
+    // Chebyshev cases (M≤2): compensated degree 2047 (paper: 1007/2031)
+    //   to offset fixed-scale noise (no FLEXIBLEAUTO).
+    //   Basic: compareDepth=12, degree=2047, depth=14 (12+2)
+    //   TC:    compareDepth=12, degree=2047, depth=17 (12+2+3)
     //   n=131072 (budget 3500) with dnum=1 for minimal KS noise.
     //
     // f,g cases (M>2): paper §6.1, depth = 4*(dg+df)+3+1 (+3 for TC).
@@ -82,7 +84,7 @@ static CKKSParams selectMultiCTParams(bool tie_correction, bool use_fg)
     }
     if (tie_correction)
     {
-        // TC + Cheby: depth=17 (paper: compareDepth=12, +2 multiCT, +3 TC)
+        // TC + Cheby: depth=17 (compareDepth=12, +2 multiCT, +3 TC)
         // Q={60,45×17}=825, P={60×44}=2640, total=3465 ≤ 3500, dnum=1
         return {131072, make_q(60, 45, 17), std::vector<int>(44, 60), 45, 1};
     }
@@ -92,9 +94,9 @@ static CKKSParams selectMultiCTParams(bool tie_correction, bool use_fg)
         // Q={60,45×24}=1140, P={60×39}=2340, total=3480 ≤ 3500
         return {131072, make_q(60, 45, 24), std::vector<int>(39, 60), 45, 1};
     }
-    // Basic + Cheby: depth=13 (paper: compareDepth=11, +2 multiCT)
-    // Q={60,45×13}=645, P={60×47}=2820, total=3465 ≤ 3500, dnum=1
-    return {131072, make_q(60, 45, 13), std::vector<int>(47, 60), 45, 1};
+    // Basic + Cheby: depth=14 (compareDepth=12, +2 multiCT)
+    // Q={60,45×14}=690, P={60×46}=2760, total=3450 ≤ 3500, dnum=1
+    return {131072, make_q(60, 45, 14), std::vector<int>(46, 60), 45, 1};
 }
 
 // ---------------------------------------------------------------------------
@@ -528,11 +530,11 @@ multiCiphertextRank(
                 diag_mask[r * L + c] = (c >= r) ? 0.5 : -0.5;
         enc.encode(diag_mask_pt, diag_mask, scale);
 
-        // Cross-block (j<k): uniform +0.5 (all cols have higher global index)
+        // Cross-block (j<k): uniform -0.5 (cols = block j = lower global index)
         std::vector<double> cross_mask(slots, 0.0);
         for (int r = 0; r < L; r++)
             for (int c = 0; c < L; c++)
-                cross_mask[r * L + c] = 0.5;
+                cross_mask[r * L + c] = -0.5;
         enc.encode(cross_mask_pt, cross_mask, scale);
     }
 
@@ -558,9 +560,10 @@ multiCiphertextRank(
     std::vector<heongpu::Ciphertext<Scheme>> Ch(M, heongpu::Ciphertext<Scheme>(ctx));
     std::vector<bool> Cv_init(M, false), Ch_init(M, false);
 
-    // TC accumulators: masked equality indicators (vertical only)
+    // TC accumulators: Ev (vertical, sumR) and Eh (horizontal, sumC+transp)
     std::vector<heongpu::Ciphertext<Scheme>> Ev(M, heongpu::Ciphertext<Scheme>(ctx));
-    std::vector<bool> Ev_init(M, false);
+    std::vector<heongpu::Ciphertext<Scheme>> Eh(M, heongpu::Ciphertext<Scheme>(ctx));
+    std::vector<bool> Ev_init(M, false), Eh_init(M, false);
 
     for (int j = 0; j < M; j++)
     {
@@ -623,13 +626,15 @@ multiCiphertextRank(
                 if (!Ev_init[j]) { Ev[j] = sign_sq;                  Ev_init[j] = true; }
                 else             { pe.add_inplace(Ev[j], sign_sq);                       }
 
-                // Complement for cross-block: block k gets negated contribution
+                // Cross-block: block k's TC goes into Eh (horizontal accumulator)
+                // because matrix rows = block k elements, cols = block j elements.
+                // Needs sumC + maskC0 + transpC in Phase 3 (same as Ch for basic).
                 if (j != k)
                 {
                     heongpu::Ciphertext<Scheme> neg_masked = sign_sq;
                     pe.negate_inplace(neg_masked);
-                    if (!Ev_init[k]) { Ev[k] = neg_masked;                  Ev_init[k] = true; }
-                    else             { pe.add_inplace(Ev[k], neg_masked);                       }
+                    if (!Eh_init[k]) { Eh[k] = neg_masked;                  Eh_init[k] = true; }
+                    else             { pe.add_inplace(Eh[k], neg_masked);                       }
                 }
             }
         }
@@ -662,7 +667,7 @@ multiCiphertextRank(
         }
     }
 
-    // TC Phase 3: sumR of masked-E accumulators (no maskC needed — vertical only)
+    // TC Phase 3: sumR(Ev) + sumC-maskC0-transpC(Eh)
     std::vector<heongpu::Ciphertext<Scheme>> tc_result;
     if (tie_correction)
     {
@@ -671,6 +676,29 @@ multiCiphertextRank(
         {
             if (Ev_init[j])
                 tc_result[j] = sumRows(Ev[j], L, sumr_key, pe, ctx);
+
+            if (Eh_init[j])
+            {
+                heongpu::Ciphertext<Scheme> eh =
+                    sumColumns(Eh[j], L, sumc_key, pe, ctx);
+                eh = maskColumn0(eh, L, pe, enc, ctx, scale);
+                eh = transposeColumn(eh, L, transpc_key, pe, ctx);
+
+                if (Ev_init[j])
+                {
+                    while (tc_result[j].level() > eh.level())
+                    {
+                        heongpu::Ciphertext<Scheme> tmp(ctx);
+                        pe.mod_drop(tc_result[j], tmp);
+                        tc_result[j] = std::move(tmp);
+                    }
+                    pe.add_inplace(tc_result[j], eh);
+                }
+                else
+                {
+                    tc_result[j] = eh;
+                }
+            }
         }
     }
 
@@ -720,10 +748,10 @@ int main(int argc, char* argv[])
     cudaSetDevice(0);
 
     // ── HE context ──────────────────────────────────────────────────────────
-    const bool use_fg = (M > 2);
+    const bool use_fg = tie_correction || (M > 2);
     const int fg_dg = 3, fg_df = 2;
-    // Paper depth2degree: basic compareDepth=11→1007, TC compareDepth=12→2031
-    const int cheby_degree = tie_correction ? 2031 : 1007;
+    // Compensated degree 2047 (paper: 1007 basic, 2031 TC) for fixed-scale CKKS
+    const int cheby_degree = 2047;
 
     CKKSParams params = selectMultiCTParams(tie_correction, use_fg);
     double scale = std::pow(2.0, params.scale_bits);
