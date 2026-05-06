@@ -11,25 +11,16 @@
  *   M ≤ 2 (N ≤ 256): Chebyshev degree 2047
  *   M > 2 (N > 256):  f,g composition (dg=3, df=2)
  *
- * Ring dimension:
- *   Basic mode:          n=32768 (M ≤ 2), n=65536 (M > 2)
- *   Tie-corrected mode:  n=65536 always (TC ops need extra depth)
+ * Ring dimension and dnum are auto-selected via selectMultiCTParams()
+ * to minimise key-switching noise (mimicking OpenFHE's ringDim=0).
+ * TC modes target dnum=1 by using a larger ring dimension.
  *
- * Depth budget — basic (Chebyshev, n=32768):
- *   TransR(1) + Cheby(11) + maskC(1) = 13 consumed, D=14
- *   Q={60, 45×14}, P={60×3}, total=870 < 881, dnum=5
+ * Parameter table (128-bit security):
  *
- * Depth budget — basic (f,g, n=65536):
- *   TransR(1) + fg(20) + maskC(1) = 22 consumed, D=22
- *   Q={60, 45×22}, P={60×11}, total=1710 < 1761, dnum=3
- *
- * Depth budget — TC (Chebyshev, n=65536):
- *   TransR(1) + Cheby(11) + sign²(1) + mask·E(1) = 14 consumed, D=15
- *   Q={60, 45×15}, P={60×13}, total=1515 < 1761, dnum=2
- *
- * Depth budget — TC (f,g, n=65536):
- *   TransR(1) + fg(20) + sign²(1) + mask·E(1) = 23 consumed, D=24
- *   Q={60, 45×24}, P={60×10}, total=1740 < 1761, dnum=3
+ *   Basic + Cheby 2047:  n=32768   Q={60,45×14}  P={60×3}   dnum=5
+ *   Basic + f,g:         n=65536   Q={60,45×22}  P={60×11}  dnum=3
+ *   TC + Cheby 2047:     n=65536   Q={60,45×15}  P={60×17}  dnum=1
+ *   TC + f,g:            n=131072  Q={60,45×24}  P={60×39}  dnum=1
  *
  * Tie-correction algorithm (same as 23_ckks_ranking_tie_correction.cpp):
  *   E = 1 − sign²  (equality indicator)
@@ -52,6 +43,51 @@
 
 static bool g_verbose = true;
 constexpr auto Scheme = heongpu::Scheme::CKKS;
+
+// ---------------------------------------------------------------------------
+// CKKS parameter selection — mimics OpenFHE's ringDim=0 auto-selection.
+// Picks the smallest ring dimension that fits the required depth while
+// maximising P primes to minimise dnum (and thus key-switching noise).
+// TC modes target dnum=1 for accuracy at deep comparison circuits.
+// ---------------------------------------------------------------------------
+struct CKKSParams {
+    size_t poly_modulus_degree;
+    std::vector<int> q_bits;
+    std::vector<int> p_bits;
+    int scale_bits;
+    int dnum;
+};
+
+static CKKSParams selectMultiCTParams(bool tie_correction, bool use_fg)
+{
+    auto make_q = [](int first, int rest_val, int rest_count) {
+        std::vector<int> q = {first};
+        for (int i = 0; i < rest_count; i++) q.push_back(rest_val);
+        return q;
+    };
+
+    if (tie_correction && use_fg)
+    {
+        // TC + f,g: depth 23, n=131072 (budget 3500) → dnum=1
+        // Q={60,45×24}=1140, P={60×39}=2340, total=3480 ≤ 3500
+        return {131072, make_q(60, 45, 24), std::vector<int>(39, 60), 45, 1};
+    }
+    if (tie_correction)
+    {
+        // TC + Cheby 2047: depth 14, n=65536 (budget 1761) → dnum=1
+        // Q={60,45×15}=735, P={60×17}=1020, total=1755 ≤ 1761
+        return {65536, make_q(60, 45, 15), std::vector<int>(17, 60), 45, 1};
+    }
+    if (use_fg)
+    {
+        // Basic + f,g: depth 22, n=65536 (budget 1761) → dnum=3
+        // Q={60,45×22}=1050, P={60×11}=660, total=1710 ≤ 1761
+        return {65536, make_q(60, 45, 22), std::vector<int>(11, 60), 45, 3};
+    }
+    // Basic + Cheby 2047: depth 13, n=32768 (budget 881) → dnum=5
+    // Q={60,45×14}=690, P={60×3}=180, total=870 ≤ 881
+    return {32768, make_q(60, 45, 14), {60, 60, 60}, 45, 5};
+}
 
 // ---------------------------------------------------------------------------
 // CKKSPolyEvaluator — exposes protected evaluate_poly for BSGS Chebyshev
@@ -650,55 +686,16 @@ int main(int argc, char* argv[])
     cudaSetDevice(0);
 
     // ── HE context ──────────────────────────────────────────────────────────
-    // Chebyshev 2047 for M≤2, f,g composition for M>2 (both modes).
-    // TC always uses n=65536 to fit degree 2047 + TC ops (sign², mask·E).
     const bool use_fg = (M > 2);
     const int fg_dg = 3, fg_df = 2;
     const int cheby_degree = 2047;
 
-    size_t poly_modulus_degree;
-    int scale_bits = 45;
-    std::vector<int> q_bits, p_bits;
-
-    if (tie_correction)
-    {
-        poly_modulus_degree = 65536;
-        if (use_fg)
-        {
-            // TC + f,g: D=24, Q={60,45×24}=25, P={60×10}, 1740<1761, dnum=3
-            q_bits = {60};
-            for (int i = 0; i < 24; i++) q_bits.push_back(45);
-            p_bits.assign(10, 60);
-        }
-        else
-        {
-            // TC + Cheby 2047: D=15, Q={60,45×15}=16, P={60×13}, 1515<1761, dnum=2
-            q_bits = {60};
-            for (int i = 0; i < 15; i++) q_bits.push_back(45);
-            p_bits.assign(13, 60);
-        }
-    }
-    else if (use_fg)
-    {
-        // Basic + f,g: D=22, Q={60,45×22}=23, P={60×11}, 1710<1761, dnum=3
-        poly_modulus_degree = 65536;
-        q_bits = {60};
-        for (int i = 0; i < 22; i++) q_bits.push_back(45);
-        p_bits.assign(11, 60);
-    }
-    else
-    {
-        // Basic + Cheby 2047: D=14, Q={60,45×14}=15, P={60×3}, 870<881, dnum=5
-        poly_modulus_degree = 32768;
-        q_bits = {60};
-        for (int i = 0; i < 14; i++) q_bits.push_back(45);
-        p_bits = {60, 60, 60};
-    }
-    double scale = std::pow(2.0, scale_bits);
+    CKKSParams params = selectMultiCTParams(tie_correction, use_fg);
+    double scale = std::pow(2.0, params.scale_bits);
 
     heongpu::HEContext<Scheme> ctx = heongpu::GenHEContext<Scheme>();
-    ctx->set_poly_modulus_degree(poly_modulus_degree);
-    ctx->set_coeff_modulus_bit_sizes(q_bits, p_bits);
+    ctx->set_poly_modulus_degree(params.poly_modulus_degree);
+    ctx->set_coeff_modulus_bit_sizes(params.q_bits, params.p_bits);
 
     GPUTimer ctx_timer;
     ctx_timer.startTimer();
@@ -712,8 +709,9 @@ int main(int argc, char* argv[])
                   << "  mode=" << (tie_correction ? "tie-corrected" : "basic") << "\n";
         std::cout << "Compare method: "
                   << (use_fg ? "f,g (dg=3, df=2)" : "Chebyshev 2047")
-                  << "  n=" << poly_modulus_degree
-                  << "  scale=2^" << scale_bits << "\n";
+                  << "  n=" << params.poly_modulus_degree
+                  << "  scale=2^" << params.scale_bits
+                  << "  dnum=" << params.dnum << "\n";
     }
 
     // ── Key generation ───────────────────────────────────────────────────────
