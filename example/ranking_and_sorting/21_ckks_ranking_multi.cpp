@@ -7,20 +7,19 @@
  *
  * Both modes use block size L=128.  M = N/L block ciphertexts.
  *
- * Comparison method (paper §6.1):
- *   M ≤ 2 (N ≤ 256): Chebyshev degree 4095
+ * Comparison method (paper §6.1, depth2degree mapping):
+ *   M ≤ 2 (N ≤ 256): Chebyshev degree 1007 (basic, depth=11) / 2031 (TC, depth=12)
  *   M > 2 (N > 256):  f,g composition (dg=3, df=2)
  *
- * Ring dimension and dnum are auto-selected via selectMultiCTParams()
- * to minimise key-switching noise (mimicking OpenFHE's ringDim=0).
- * All modes target dnum=1 for maximum accuracy.
+ * All modes use n=131072 (budget=3500) for precision headroom when
+ * accumulating sign results across M*(M+1)/2 block comparisons.
  *
- * Parameter table (128-bit security):
+ * Parameter table (128-bit security, dnum=1 throughout):
  *
- *   Basic + Cheby 4095:  n=65536   Q={60,45×15}  P={60×17}  dnum=1
- *   Basic + f,g:         n=131072  Q={60,45×24}  P={60×39}  dnum=1
- *   TC + Cheby 4095:     n=65536   Q={60,45×15}  P={60×17}  dnum=1
- *   TC + f,g:            n=131072  Q={60,45×27}  P={60×37}  dnum=1
+ *   Basic Cheby:  Q={60,45×13}  P={60×47}  depth=13 (compareDepth=11 + 2)
+ *   TC Cheby:     Q={60,45×17}  P={60×44}  depth=17 (compareDepth=12 + 2 + 3)
+ *   Basic f,g:    Q={60,45×24}  P={60×39}  depth=24 (4*(3+2)+3+1)
+ *   TC f,g:       Q={60,45×27}  P={60×37}  depth=27 (24+3)
  *
  * Tie-correction algorithm (same as 23_ckks_ranking_tie_correction.cpp):
  *   E = 1 − sign²  (equality indicator)
@@ -66,27 +65,35 @@ static CKKSParams selectMultiCTParams(bool tie_correction, bool use_fg)
         return q;
     };
 
+    // Chebyshev cases (M≤2): match paper's exact compareDepth.
+    //   Basic: compareDepth=11, degree=1007, depth=13 (11+2)
+    //   TC:    compareDepth=12, degree=2031, depth=17 (12+2+3)
+    //   n=131072 (budget 3500) with dnum=1 for minimal KS noise.
+    //
+    // f,g cases (M>2): paper §6.1, depth = 4*(dg+df)+3+1 (+3 for TC).
+    //   n=131072 (budget 3500) with dnum=1 for minimal KS noise.
+
     if (tie_correction && use_fg)
     {
-        // TC + f,g: depth=27 (paper: 4*(3+2)+3+1+3), n=131072 (budget 3500) → dnum=1
+        // TC + f,g: depth=27 (paper: 4*(3+2)+3+1+3), n=131072 → dnum=1
         // Q={60,45×27}=1275, P={60×37}=2220, total=3495 ≤ 3500
         return {131072, make_q(60, 45, 27), std::vector<int>(37, 60), 45, 1};
     }
     if (tie_correction)
     {
-        // TC + Cheby 4095: depth=15, n=65536 (budget 1761) → dnum=1
-        // Q={60,45×15}=735, P={60×17}=1020, total=1755 ≤ 1761
-        return {65536, make_q(60, 45, 15), std::vector<int>(17, 60), 45, 1};
+        // TC + Cheby: depth=17 (paper: compareDepth=12, +2 multiCT, +3 TC)
+        // Q={60,45×17}=825, P={60×44}=2640, total=3465 ≤ 3500, dnum=1
+        return {131072, make_q(60, 45, 17), std::vector<int>(44, 60), 45, 1};
     }
     if (use_fg)
     {
-        // Basic + f,g: depth=24 (paper: 4*(3+2)+3+1), n=131072 (budget 3500) → dnum=1
+        // Basic + f,g: depth=24 (paper: 4*(3+2)+3+1), n=131072 → dnum=1
         // Q={60,45×24}=1140, P={60×39}=2340, total=3480 ≤ 3500
         return {131072, make_q(60, 45, 24), std::vector<int>(39, 60), 45, 1};
     }
-    // Basic + Cheby 4095: depth=15, n=65536 (budget 1761) → dnum=1
-    // Q={60,45×15}=735, P={60×17}=1020, total=1755 ≤ 1761
-    return {65536, make_q(60, 45, 15), std::vector<int>(17, 60), 45, 1};
+    // Basic + Cheby: depth=13 (paper: compareDepth=11, +2 multiCT)
+    // Q={60,45×13}=645, P={60×47}=2820, total=3465 ≤ 3500, dnum=1
+    return {131072, make_q(60, 45, 13), std::vector<int>(47, 60), 45, 1};
 }
 
 // ---------------------------------------------------------------------------
@@ -688,7 +695,8 @@ int main(int argc, char* argv[])
     // ── HE context ──────────────────────────────────────────────────────────
     const bool use_fg = (M > 2);
     const int fg_dg = 3, fg_df = 2;
-    const int cheby_degree = 4095;
+    // Paper depth2degree: basic compareDepth=11→1007, TC compareDepth=12→2031
+    const int cheby_degree = tie_correction ? 2031 : 1007;
 
     CKKSParams params = selectMultiCTParams(tie_correction, use_fg);
     double scale = std::pow(2.0, params.scale_bits);
