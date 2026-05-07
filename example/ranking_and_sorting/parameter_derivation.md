@@ -19,9 +19,8 @@ each example file back to the exact line in the reference code.
 4. [20\_ckks\_median — Homomorphic Median](#4-20_ckks_median)
 5. [21\_ckks\_ranking\_multi — Multi-Ciphertext Ranking](#5-21_ckks_ranking_multi)
 6. [22\_ckks\_sorting\_paper — Homomorphic Sorting](#6-22_ckks_sorting_paper)
-7. [23\_ckks\_ranking\_tie\_correction — Single-CT Ranking (Paper-Spec)](#7-23_ckks_ranking_tie_correction)
-8. [24\_ckks\_ranking\_tie\_correction\_extended — Single-CT Ranking (Extended)](#8-24_ckks_ranking_tie_correction_extended)
-9. [Key Differences: OpenFHE vs HEonGPU](#9-key-differences)
+7. [23\_ckks\_ranking\_tie\_correction — Single-CT Ranking](#7-23_ckks_ranking_tie_correction)
+8. [Key Differences: OpenFHE vs HEonGPU](#8-key-differences)
 
 ---
 
@@ -508,34 +507,7 @@ HEonGPU's BSGS evaluation, which fits within the available depth budget.
 
 ---
 
-## 8. 24\_ckks\_ranking\_tie\_correction\_extended
-
-**Algorithm**: Same as 23\_ but extended beyond paper spec using larger ring
-dimensions. This is a thesis contribution (Section 1.2.5) showing that GPU
-parallelism enables larger CKKS parameters practically.
-
-**Reference**: Same as 23\_, but the extension to larger N and ring dimensions
-has no direct reference counterpart.
-
-### HEonGPU parameter tiers
-
-| N range / mode         | n       | Q chain        | P chain   | scale | dnum | depth |
-|:-----------------------|--------:|:---------------|:----------|------:|-----:|------:|
-| N<=32 basic            | 32768   | {36, 35x14}    | {36x8}    | 35    | 2    | <=14  |
-| N<=128 basic (large N) | 32768   | {60, 45x14}    | {60x3}    | 45    | 5    | <=14  |
-| N=128 TC               | 65536   | {60, 45x15}    | {60x13}   | 45    | 2    | 15    |
-| N=256                  | 131072  | {60, 45x15}    | {60x13}   | 45    | 2    | <=15  |
-| N=512                  | 524288  | {60, 45x15}    | {60x13}   | 45    | 2    | <=15  |
-
-The first two tiers are identical to 23\_ (paper-spec). The extended tiers
-use progressively larger ring dimensions to accommodate depth-15 circuits
-that don't fit at n=32768.
-
-Chebyshev degree selection is the same as 23\_ (`selectChebyshevDegree()`).
-
----
-
-## 9. Key Differences: OpenFHE vs HEonGPU
+## 8. Key Differences: OpenFHE vs HEonGPU
 
 ### FLEXIBLEAUTO vs Fixed-Scale CKKS
 
@@ -607,6 +579,6 @@ rather than accumulated into the tree). This affects noise:
 - `lead=true`: Used for f,g functions (essential for accuracy — switching
   to `lead=false` causes catastrophic errors in the f,g path)
 - `lead=false`: Used for Chebyshev sign approximation in single-CT ranking
-  (23\_ and 24\_)
+  (23\_)
 - The multi-CT ranking (21\_) uses `lead=false` for Chebyshev sign and
   `lead=true` for f,g, matching each method's requirements

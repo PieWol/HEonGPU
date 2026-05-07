@@ -1,29 +1,35 @@
 #!/usr/bin/env python3
 """
-Overarching benchmark runner for all HE order-statistics algorithms from:
+Benchmark runner for all HE order-statistics algorithms.
+
+Implements ranking, sorting, minimum, and median from:
   "Efficient Ranking, Order Statistics, and Sorting under CKKS"
   Mazzone et al., USENIX Security 2025
 
-Runs ranking (basic + tie-corrected), sorting, minimum, and median for each N
-and saves a combined CSV that allows direct comparison of timings across all
-algorithms.  Per-algorithm N caps are enforced automatically:
-  - ranking:    N <= 128
-  - ranking_tc: N <= 64  (tie correction adds 2 levels)
-  - sorting:    N <= 256
-  - minimum:    N <= 128
-  - median:     N <= 128
+Parameter choices differ from the reference OpenFHE implementation:
+  - Ranking/TC use f,g sign composition (dg=3, df=2) instead of Chebyshev.
+    N<=32: Chebyshev at n=32768.  N>32: f,g at n=65536.
+  - Sorting uses paper-exact parameters at n=131072.
+  - Minimum/median use Chebyshev at n=131072.
+
+Per-algorithm N caps (single-ciphertext, limited by N²<=slots):
+  - ranking:    N <= 128  (n=65536 for N>32, n=32768 for N<=32)
+  - ranking_tc: N <= 128  (f,g at n=65536)
+  - sorting:    N <= 256  (n=131072)
+  - minimum:    N <= 256  (n=131072)
+  - median:     N <= 256  (n=131072)
 
 Usage:
-    python3 benchmark_all.py [--n-values N1 N2 ...] [--runs R] [--output FILE]
+    python3 benchmark_all_paper_spec.py [--n-values N1 N2 ...] [--runs R] [--output FILE]
 
     # Quick test:
-    python3 benchmark_all.py --n-values 8 16 --runs 1
+    python3 benchmark_all_paper_spec.py --n-values 8 16 --runs 1
 
-    # Full paper-equivalent sweep (default — includes N=256 for sorting):
-    python3 benchmark_all.py
+    # Full sweep (default):
+    python3 benchmark_all_paper_spec.py
 
     # Custom N set, 5 runs each:
-    python3 benchmark_all.py --n-values 8 16 32 64 128 256 --runs 5
+    python3 benchmark_all_paper_spec.py --n-values 8 16 32 64 128 256 --runs 5
 """
 
 import subprocess
@@ -36,13 +42,13 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _BIN_DIR    = _SCRIPT_DIR.parent / "build/bin/examples/ranking_and_sorting"
 
-# Each entry: (label, binary name, timing field, extra args, max N)
+# (label, binary name, timing field, extra args, max N)
 BENCHMARKS = [
     ("ranking",    "23_ckks_ranking_tie_correction",  "rank_ms",   [],                  128),
-    ("ranking_tc", "23_ckks_ranking_tie_correction",  "rank_ms",   ["--tie-correction"], 64),
+    ("ranking_tc", "23_ckks_ranking_tie_correction",  "rank_ms",   ["--tie-correction"], 128),
     ("sorting",    "22_ckks_sorting_paper",           "sort_ms",   [],                  256),
-    ("minimum",    "19_ckks_minimum",                 "min_ms",    [],                  128),
-    ("median",     "20_ckks_median",                  "median_ms", [],                  128),
+    ("minimum",    "19_ckks_minimum",                 "min_ms",    [],                  256),
+    ("median",     "20_ckks_median",                  "median_ms", [],                  256),
 ]
 
 N_VALUES_DEFAULT = [8, 16, 32, 64, 128, 256]
@@ -53,7 +59,7 @@ def run_once(binary: Path, n: int, extra_args: list[str] = []) -> dict | None:
     try:
         result = subprocess.run(
             [str(binary), str(n), "--bench"] + extra_args,
-            capture_output=True, text=True, timeout=600
+            capture_output=True, text=True, timeout=3600
         )
     except subprocess.TimeoutExpired:
         print(f"    TIMEOUT", file=sys.stderr)
@@ -105,7 +111,6 @@ def benchmark_one(binary: Path, label: str, timing_field: str,
         avg.update({f"{label}.{k}_stdev": statistics.stdev(r[k] for r in run_results)
                     for k in numeric_keys})
     avg[f"{label}.runs"] = len(run_results)
-    # Convenience: plain timing in seconds
     avg[f"{label}.{timing_field[:-3]}_s"] = avg[f"{label}.{timing_field}"] / 1000.0
     return avg
 
@@ -198,7 +203,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Resolve binaries and validate they exist
     binaries: dict[str, Path] = {}
     active_benchmarks = [(l, b, tf, ea, mn) for l, b, tf, ea, mn in BENCHMARKS
                          if l not in args.skip]
@@ -213,12 +217,11 @@ def main() -> None:
         for label, path in missing:
             print(f"Binary not found [{label}]: {path}")
         print("\nBuild missing binaries with:")
-        for label, _, _, _, _ in active_benchmarks:
+        for label, path in missing:
             bin_name = next(b for l, b, _, _, _ in BENCHMARKS if l == label)
             print(f"  cmake --build build --target {bin_name}")
         sys.exit(1)
 
-    # Validate N values
     max_n = max(mn for _, _, _, _, mn in active_benchmarks)
     for n in args.n_values:
         if n <= 0 or (n & (n - 1)) != 0:
@@ -259,7 +262,6 @@ def main() -> None:
                 row.update(result)
         all_results.append(row)
 
-        # Per-N summary line
         active_for_n = [(l, tf) for l, _, tf, _, mn in active_benchmarks if n <= mn]
         summary = "  Summary: " + "  |  ".join(
             f"{l}={row.get(f'{l}.{tf}', float('nan')):.1f}ms"

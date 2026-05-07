@@ -2,16 +2,16 @@
 """
 Benchmark multi-ciphertext HE ranking for large N.
 
-Both basic and tie-corrected modes use B=128 blocks.
-TC mode uses extended ring dimension (n=65536) for degree 2047 + TC ops.
+Both basic and tie-corrected modes use B=128 blocks, f,g sign composition,
+and n=65536 with adaptive dnum.
 
 Usage:
     # Basic ranking (default):
-    python3 benchmark_ranking_multi.py                          # N=[256,512], 3 runs
+    python3 benchmark_ranking_multi.py                          # N=256..16384, 3 runs
     python3 benchmark_ranking_multi.py --n-values 256 --runs 1  # quick test
 
     # Tie-corrected ranking:
-    python3 benchmark_ranking_multi.py --tie-correction                     # N=[256,512], 3 runs
+    python3 benchmark_ranking_multi.py --tie-correction                     # N=256..16384, 3 runs
     python3 benchmark_ranking_multi.py --tie-correction --n-values 256 512  # explicit N
 """
 
@@ -25,8 +25,8 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/ranking_and_sorting/21_ckks_ranking_multi"
 
-N_VALUES_BASIC = [256, 512]
-N_VALUES_TC    = [256, 512]
+N_VALUES_BASIC = [256, 512, 1024, 2048, 4096, 8192, 16384]
+N_VALUES_TC    = [256, 512, 1024, 2048, 4096, 8192, 16384]
 
 
 def run_once(binary: Path, n: int, tie_correction: bool) -> dict | None:
@@ -35,7 +35,7 @@ def run_once(binary: Path, n: int, tie_correction: bool) -> dict | None:
         cmd.append("--tie-correction")
     repo_root = _SCRIPT_DIR.parent
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200,
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200,
                                 cwd=str(repo_root))
     except subprocess.TimeoutExpired:
         print(f"  TIMEOUT for N={n}", file=sys.stderr)
@@ -132,7 +132,7 @@ def main() -> None:
                         help="Vector lengths to benchmark (default depends on mode)")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--tie-correction", action="store_true",
-                        help="Enable tie correction (B=64 blocks, degree 1023)")
+                        help="Enable tie correction")
     parser.add_argument("--output", type=Path, default=None,
                         help="CSV output file (default: auto-named)")
     args = parser.parse_args()
