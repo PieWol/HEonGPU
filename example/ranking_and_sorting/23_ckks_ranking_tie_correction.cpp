@@ -50,13 +50,14 @@ class CKKSPolyEvaluator : public heongpu::HEArithmeticOperator<Scheme>
     heongpu::Ciphertext<Scheme>
     eval_chebyshev(heongpu::Ciphertext<Scheme>& ct, double target_scale,
                    const std::vector<Complex64>& coeffs, int degree,
-                   heongpu::Relinkey<Scheme>& relin_key, double a = -1.0,
-                   double b = 1.0)
+                   heongpu::Relinkey<Scheme>& relin_key,
+                   bool lead = false,
+                   double a = -1.0, double b = 1.0)
     {
-        Polynomial poly(degree, coeffs, /*lead=*/false,
+        Polynomial poly(degree, coeffs, lead,
                         heongpu::PolyType::CHEBYSHEV, a, b);
         if (g_verbose)
-            std::cout << "  Chebyshev poly degree=" << degree
+            std::cout << "  poly degree=" << degree
                       << " depth=" << poly.depth() << " levels\n";
         return evaluate_poly(ct, target_scale, poly, relin_key,
                              heongpu::ExecutionOptions());
@@ -89,6 +90,12 @@ chebyshev_sign_approx(heongpu::Ciphertext<Scheme>& ct_diff,
                       CKKSPolyEvaluator& poly_eval,
                       heongpu::Relinkey<Scheme>& relin_key, double scale,
                       int degree = 2047);
+
+heongpu::Ciphertext<Scheme>
+fg_sign_approx(heongpu::Ciphertext<Scheme>& ct_diff,
+               CKKSPolyEvaluator& poly_eval,
+               heongpu::Relinkey<Scheme>& relin_key, double scale,
+               int dg = 3, int df = 2);
 
 heongpu::Ciphertext<Scheme>
 sumRows(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
@@ -178,7 +185,7 @@ basicRank(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
           CKKSPolyEvaluator& evaluator,
           heongpu::HEEncoder<Scheme>& encoder,
           heongpu::HEContext<Scheme>& context, double scale,
-          bool tie_correction);
+          bool tie_correction, bool use_fg, int cheby_degree);
 
 class GPUTimer
 {
@@ -263,50 +270,73 @@ int main(int argc, char* argv[])
 
     // ===== HE Context =====
     //
-    // Depth budget (fixed-scale CKKS):
-    //   Basic (no tie correction):
-    //     depth = compareDepth + 2    (transpose 1 + Chebyshev compareDepth
-    //                                  + multiply_plain(0.5) 1)
+    // N<=32: Chebyshev sign at n=32768 (sufficient accuracy, small footprint)
+    //   depth = ceil(log2(degree+1)) + 2;  TC adds +2 for sign²+mask
+    //   n=32768, Q={36,35×14}, P={36×8}, scale=2^35, dnum=2
     //
-    //   Tie-corrected (Algorithm 6 offset on top of basic):
-    //     depth = compareDepth + 4    (basic + sign^2 1 level + mask*E 1 level)
-    //
-    //   With 15 Q primes (14 levels), both modes support N up to 128:
-    //     Basic   N=128: compareDepth=11, depth=13, headroom=1
-    //     TieCorr N=128: compareDepth=11, depth=15... needs 16 primes!
-    //
-    //   So tie correction caps at N=64 with current parameters:
-    //     TieCorr N=64:  compareDepth=10, depth=14, headroom=0 (exact fit)
-    //
-    // Parameters identical to 17_ckks_ranking_paper.cpp.
+    // N>32: f,g composition (dg=3, df=2) at n=65536
+    //   Better runtime than Chebyshev without hitting memory limits.
+    //   Each degree-7 poly = 4 levels, 5 evals = 20 levels for sign.
+    //   Basic:  transpose(1) + fg(20) + scale(1) = 22
+    //           n=65536, Q={60,45×22}, P={60×11}, scale=2^45, dnum=3
+    //   TC:     transpose(1) + fg(20) + sign²(1) + mask(1) + scale(1) = 24
+    //           n=65536, Q={60,45×24}, P={60×10}, scale=2^45, dnum=3
     heongpu::HEContext<Scheme> context = heongpu::GenHEContext<Scheme>();
 
-    const size_t poly_modulus_degree = 32768;
-    context->set_poly_modulus_degree(poly_modulus_degree);
-
+    size_t poly_modulus_degree;
     int scale_bits;
-    if (vec_len <= 32)
+    int available_depth;
+
+    // f,g composition for N>32: better runtime than Chebyshev without hitting
+    // memory limits. N<=32: Chebyshev at n=32768 (sufficient accuracy, smaller).
+    const bool use_fg = (vec_len > 32);
+    const int cheby_degree = use_fg ? 0 : selectChebyshevDegree(vec_len);
+    int required_depth;
+    if (use_fg)
+        // TC: transpose(1) + fg(20) + sign²(1) + mask(1) + scale(1) = 24
+        // Basic: transpose(1) + fg(20) + scale(1) = 22
+        required_depth = tie_correction ? 24 : 22;
+    else
+        // Chebyshev: transpose(1) + cheby + scale(1), TC adds sign²(1) + mask(1)
+        required_depth = static_cast<int>(std::ceil(std::log2(cheby_degree + 1)))
+                         + (tie_correction ? 4 : 2);
+
+    if (use_fg && tie_correction)
     {
+        // n=65536 (budget 1761): Q={60,45×24}=1140, P={60×10}=600, total=1740, dnum=3
+        poly_modulus_degree = 65536;
+        context->set_poly_modulus_degree(poly_modulus_degree);
+        context->set_coeff_modulus_bit_sizes(
+            {60, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45,
+             45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45},
+            {60, 60, 60, 60, 60, 60, 60, 60, 60, 60});
+        scale_bits = 45;
+        available_depth = 24;
+    }
+    else if (use_fg && !tie_correction)
+    {
+        // n=65536 (budget 1761): Q={60,45×22}=1050, P={60×11}=660, total=1710, dnum=3
+        poly_modulus_degree = 65536;
+        context->set_poly_modulus_degree(poly_modulus_degree);
+        context->set_coeff_modulus_bit_sizes(
+            {60, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45,
+             45, 45, 45, 45, 45, 45, 45, 45, 45, 45},
+            {60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60});
+        scale_bits = 45;
+        available_depth = 22;
+    }
+    else
+    {
+        // N<=32 Chebyshev: n=32768, Q={36,35×14}, P={36×8}, scale=2^35, dnum=2
+        poly_modulus_degree = 32768;
+        context->set_poly_modulus_degree(poly_modulus_degree);
         context->set_coeff_modulus_bit_sizes(
             {36, 35, 35, 35, 35, 35, 35, 35, 35, 35, 35, 35, 35, 35, 35},
             {36, 36, 36, 36, 36, 36, 36, 36});
         scale_bits = 35;
-    }
-    else
-    {
-        context->set_coeff_modulus_bit_sizes(
-            {60, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45},
-            {60, 60, 60});
-        scale_bits = 45;
+        available_depth = 14;
     }
     double scale = pow(2.0, scale_bits);
-
-    const int cheby_degree    = selectChebyshevDegree(vec_len);
-    const int compare_depth   = static_cast<int>(std::ceil(std::log2(cheby_degree + 1)));
-    const int basic_depth     = compare_depth + 2;
-    const int tie_corr_depth  = compare_depth + 4;
-    const int required_depth  = tie_correction ? tie_corr_depth : basic_depth;
-    const int available_depth = 14; // 15 Q primes - 1
 
     if (required_depth > available_depth)
     {
@@ -333,16 +363,13 @@ int main(int argc, char* argv[])
     if (g_verbose)
     {
         std::cout << "N=" << vec_len << "  mode="
-                  << (tie_correction ? "tie-corrected" : "basic")
-                  << "  degree=" << cheby_degree
-                  << "  depth=" << required_depth << "/" << available_depth
-                  << "\n";
-        if (vec_len <= 32)
-            std::cout << "Paper-exact params: Q={36,35x14}, P={36x8}, "
-                      << "scale=2^35, dnum=2\n";
+                  << (tie_correction ? "tie-corrected" : "basic");
+        if (use_fg)
+            std::cout << "  sign=g^3*f^2";
         else
-            std::cout << "Precision-adjusted params: Q={60,45x14}, P={60x3}, "
-                      << "scale=2^45, dnum=5\n";
+            std::cout << "  degree=" << cheby_degree;
+        std::cout << "  depth=" << required_depth << "/" << available_depth
+                  << "  n=" << poly_modulus_degree << "\n";
     }
 
     // ===== Key material =====
@@ -437,7 +464,7 @@ int main(int argc, char* argv[])
     heongpu::Ciphertext<Scheme> ct_rank =
         basicRank(ciphertext, vec_len, row_galois_key, col_galois_key,
                   transpose_galois_key, sumr_galois_key, relin_key, evaluator,
-                  encoder, context, scale, tie_correction);
+                  encoder, context, scale, tie_correction, use_fg, cheby_degree);
 
     float rank_ms = rank_timer.stopTimer();
     size_t gpu_rank_mib = (heongpu::MemoryPool::instance().get_current_device_pool_memory_usage()
@@ -627,6 +654,51 @@ chebyshev_sign_approx(heongpu::Ciphertext<Scheme>& ct_diff,
                                     relin_key, -1.0, 1.0);
 }
 
+// f,g composition sign approximation (outputs [-1,+1])
+// g3(t) = t*(4589 + t²*(-16577 + t²*(25614 - 12860*t²))) / 1024
+// f3(t) = t*(35 + t²*(-35 + t²*(21 - 5*t²))) / 16
+// Each is degree 7 → 4 levels per evaluation. Total: (dg+df)*4 = 20 levels.
+static heongpu::Ciphertext<Scheme>
+applyG3(heongpu::Ciphertext<Scheme>& ct, CKKSPolyEvaluator& pe,
+        heongpu::Relinkey<Scheme>& rk, double scale)
+{
+    auto fn = [](Complex64 x) -> Complex64 {
+        double t = x.real(), t2 = t * t;
+        return {t * (4589.0 + t2 * (-16577.0 + t2 * (25614.0 - 12860.0 * t2)))
+                / 1024.0, 0.0};
+    };
+    auto coeffs = heongpu::approximate_function(fn, -1.0, 1.0, 7);
+    return pe.eval_chebyshev(ct, scale, coeffs, 7, rk, true);
+}
+
+static heongpu::Ciphertext<Scheme>
+applyF3(heongpu::Ciphertext<Scheme>& ct, CKKSPolyEvaluator& pe,
+        heongpu::Relinkey<Scheme>& rk, double scale)
+{
+    auto fn = [](Complex64 x) -> Complex64 {
+        double t = x.real(), t2 = t * t;
+        return {t * (35.0 + t2 * (-35.0 + t2 * (21.0 - 5.0 * t2))) / 16.0, 0.0};
+    };
+    auto coeffs = heongpu::approximate_function(fn, -1.0, 1.0, 7);
+    return pe.eval_chebyshev(ct, scale, coeffs, 7, rk, true);
+}
+
+heongpu::Ciphertext<Scheme>
+fg_sign_approx(heongpu::Ciphertext<Scheme>& ct_diff,
+               CKKSPolyEvaluator& poly_eval,
+               heongpu::Relinkey<Scheme>& relin_key, double scale,
+               int dg, int df)
+{
+    if (g_verbose)
+        std::cout << "  f,g sign approx (dg=" << dg << ", df=" << df << ")...\n";
+    heongpu::Ciphertext<Scheme> ct = ct_diff;
+    for (int i = 0; i < dg; i++)
+        ct = applyG3(ct, poly_eval, relin_key, scale);
+    for (int i = 0; i < df; i++)
+        ct = applyF3(ct, poly_eval, relin_key, scale);
+    return ct;
+}
+
 heongpu::Ciphertext<Scheme>
 sumRows(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
         heongpu::Galoiskey<Scheme>& sumr_galois_key,
@@ -664,7 +736,7 @@ basicRank(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
           CKKSPolyEvaluator& evaluator,
           heongpu::HEEncoder<Scheme>& encoder,
           heongpu::HEContext<Scheme>& context, double scale,
-          bool tie_correction)
+          bool tie_correction, bool use_fg, int cheby_degree)
 {
     if (g_verbose)
     {
@@ -692,12 +764,21 @@ basicRank(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
     heongpu::Ciphertext<Scheme> ct_diff(context);
     evaluator.sub(ct_row, ct_col, ct_diff);
 
-    const int cheby_degree = selectChebyshevDegree(vec_len);
-    if (g_verbose)
-        std::cout << "Step 4: Chebyshev sign approx (N=" << vec_len
-                  << " -> degree=" << cheby_degree << ")...\n";
-    heongpu::Ciphertext<Scheme> ct_sign = chebyshev_sign_approx(
-        ct_diff, evaluator, relin_key, scale, cheby_degree);
+    heongpu::Ciphertext<Scheme> ct_sign(context);
+    if (use_fg)
+    {
+        if (g_verbose)
+            std::cout << "Step 4: f,g sign approx (dg=3, df=2)...\n";
+        ct_sign = fg_sign_approx(ct_diff, evaluator, relin_key, scale, 3, 2);
+    }
+    else
+    {
+        if (g_verbose)
+            std::cout << "Step 4: Chebyshev sign approx (N=" << vec_len
+                      << " -> degree=" << cheby_degree << ")...\n";
+        ct_sign = chebyshev_sign_approx(ct_diff, evaluator, relin_key, scale,
+                                        cheby_degree);
+    }
 
     // --- Save raw sign matrix for tie correction before modifying ---
     heongpu::Ciphertext<Scheme> ct_sign_raw;
