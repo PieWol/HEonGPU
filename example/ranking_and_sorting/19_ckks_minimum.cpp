@@ -195,7 +195,7 @@ compareGtChebyshev(const heongpu::Ciphertext<Scheme>& a,
 // ---------------------------------------------------------------------------
 // Chebyshev indicator: detects rank ≈ 1 (minimum)
 // Pre-normalizes rank to [-1, 1] using domain [0, N+1] for noise headroom,
-// then evaluates Chebyshev indicator for rank ∈ [0.5, 1.5].
+// then evaluates Chebyshev indicator for rank ∈ [0.5, 2.0].
 //
 // Paper reference: indicator(c, 0.5, 1.5, 0.5, N+0.5, degree)
 // We widen the domain to [0, N+1] so that the maximum rank (≈ N+0.5 plus

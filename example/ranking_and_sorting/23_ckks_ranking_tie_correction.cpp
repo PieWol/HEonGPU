@@ -104,12 +104,13 @@ sumRows(const heongpu::Ciphertext<Scheme>& ct_matrix, int vec_len,
         heongpu::HEContext<Scheme>& context);
 
 // Paper's compareDepth table (same for both basic and tie-corrected ranking;
-// the comparison function is identical, only the post-processing differs):
+// the comparison function is identical, only the post-processing differs).
+// Only N<=32 entries are used; N>32 uses f,g composition instead.
 //   N<=8:   compareDepth=7  -> degree=127
 //   N<=16:  compareDepth=8  -> degree=255
 //   N<=32:  compareDepth=9  -> degree=511
-//   N<=64:  compareDepth=10 -> degree=1023
-//   N<=128: compareDepth=11 -> degree=2047
+//   N<=64:  compareDepth=10 -> degree=1023   (unused, f,g path)
+//   N<=128: compareDepth=11 -> degree=2047   (unused, f,g path)
 int selectChebyshevDegree(int N)
 {
     if (N <= 8)   return 127;
@@ -544,7 +545,7 @@ int main(int argc, char* argv[])
     return EXIT_SUCCESS;
 }
 
-// ===== Algorithm implementations (based on 17_ckks_ranking_paper.cpp) =====
+// ===== Algorithm implementations =====
 
 heongpu::Ciphertext<Scheme>
 replicateRow(const heongpu::Ciphertext<Scheme>& row_initial, int vec_len,
@@ -651,7 +652,7 @@ chebyshev_sign_approx(heongpu::Ciphertext<Scheme>& ct_diff,
         heongpu::approximate_function(sign_func, -1.0, 1.0, degree);
 
     return poly_eval.eval_chebyshev(ct_diff, scale, cheby_coeffs, degree,
-                                    relin_key, -1.0, 1.0);
+                                    relin_key, false, -1.0, 1.0);
 }
 
 // f,g composition sign approximation (outputs [-1,+1])
@@ -785,7 +786,7 @@ basicRank(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
     if (tie_correction)
         ct_sign_raw = ct_sign;
 
-    // --- Basic ranking (identical to 17_ckks_ranking_paper.cpp) ---
+    // --- Basic ranking ---
 
     if (g_verbose)
         std::cout << "Step 5: Add 1 to shift sign range...\n";
@@ -853,7 +854,7 @@ basicRank(const heongpu::Ciphertext<Scheme>& ct_vector, int vec_len,
     encoder.encode(adj_mask_pt, adj_mask_values, scale);
 
     // Align plaintext depth to ciphertext depth (encode sets depth=0,
-    // but ct_sign_sq is at compareDepth+2 after Chebyshev + sign^2)
+    // but ct_sign_sq is at compareDepth+2 after sign approximation + sign^2)
     while (adj_mask_pt.depth() < ct_sign_sq.depth())
         evaluator.mod_drop_inplace(adj_mask_pt);
 

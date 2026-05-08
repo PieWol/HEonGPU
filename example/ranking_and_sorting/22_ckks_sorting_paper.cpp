@@ -26,7 +26,8 @@
  * primes needs 3069 Q-bits at depth=51, yielding dnum=8 — too large.
  * We find the largest scale (starting from 59) that keeps dnum ≤ 5
  * (the paper's maximum for single-CT sorting).  This gives scale=59
- * where the budget allows (N≤16) and reduces to ~54 at deep chains.
+ * where the budget allows (N≥8) and reduces to ~54 at deep chains
+ * (N=4 gets scale=57 due to its stricter dnum=2 target).
  *
  * Example parameter budgets at n=131072 (security limit 3500 bits):
  *                      ours (fixed-scale)           paper (FLEXIBLEAUTO)
@@ -41,10 +42,9 @@
  * (optimized: the ×4 factor and mask-0.5 are folded into a single adjusted
  * plaintext multiply).
  *
- * Usage:  22_ckks_sorting_paper [N] [--bench] [--ties]
+ * Usage:  22_ckks_sorting_paper [N] [--bench]
  *   N       : vector length, power of 2, default 4
  *   --bench : machine-readable timing output only
- *   --ties  : use paired tied input to verify tie correction
  */
 
 #include <heongpu/heongpu.hpp>
@@ -606,14 +606,11 @@ int main(int argc, char* argv[])
 {
     int  N          = 4;
     bool bench_mode = false;
-    bool use_ties   = false;
     for (int i = 1; i < argc; i++)
     {
         std::string arg(argv[i]);
         if (arg == "--bench")
             bench_mode = true;
-        else if (arg == "--ties")
-            use_ties = true;
         else if (!arg.empty() && std::isdigit(static_cast<unsigned char>(arg[0])))
             N = std::stoi(arg);
     }
@@ -723,8 +720,9 @@ int main(int argc, char* argv[])
                   << " — requires >16 GB VRAM (e.g. L40 48 GB).\n";
 
     // n=131072 is the minimum ring dimension for 128-bit security at every N:
-    // even N=4 needs depth 37 → Q≈2243 bits, which exceeds the 1770-bit
-    // budget of n=65536. The depth (not the slot count) is the binding constraint.
+    // even N=4 needs depth 39 → Q≈2283 bits (scale=57), which exceeds the
+    // 1770-bit budget of n=65536. The depth (not the slot count) is the binding
+    // constraint.
     const size_t poly_modulus_degree = 131072;
 
     std::vector<int> q_bits = {60};
@@ -869,8 +867,7 @@ int main(int argc, char* argv[])
     }
     else
     {
-        std::cout << "\n=== Sorting Results"
-                  << (use_ties ? " (tied input)" : "") << " ===\n";
+        std::cout << "\n=== Sorting Results ===\n";
         std::cout << "HE sorted (normalized):     "; display_vector(he_sorted, N);
         std::cout << "HE sorted (original scale): "; display_vector(he_sorted_orig, N);
 
