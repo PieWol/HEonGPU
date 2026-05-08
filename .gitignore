@@ -6,6 +6,10 @@ Makefile
 CTestTestfile.cmake
 benchmark/benchmark_run.log
 benchmark/*.csv
+benchmark_ranking_and_sorting/*.csv
+benchmark_ranking_and_sorting/*.log
+benchmark_ranking_and_sorting/*.pdf
+benchmark_ranking_and_sorting/*.png
 
 # Output directories
 /bin/

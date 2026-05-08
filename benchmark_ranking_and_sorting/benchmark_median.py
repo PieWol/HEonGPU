@@ -27,7 +27,7 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 BINARY_DEFAULT = _SCRIPT_DIR.parent / "build/bin/examples/ranking_and_sorting/20_ckks_median"
 
-N_VALUES_DEFAULT = [8, 16, 32, 64, 128]
+N_VALUES_DEFAULT = [8, 16, 32, 64, 128, 256]
 
 
 def run_once(binary: Path, n: int) -> dict | None:
@@ -137,7 +137,7 @@ def main() -> None:
     parser.add_argument(
         "--n-values", type=int, nargs="+", default=N_VALUES_DEFAULT,
         metavar="N",
-        help="Vector lengths to benchmark (must be powers of 2, N<=128)"
+        help="Vector lengths to benchmark (must be powers of 2, N<=256)"
     )
     parser.add_argument(
         "--runs", type=int, default=3,
@@ -159,10 +159,10 @@ def main() -> None:
         if n <= 0 or (n & (n - 1)) != 0:
             print(f"Error: N={n} is not a positive power of 2")
             sys.exit(1)
-        if n > 128:
-            print(f"Warning: N={n} exceeds single-CT limit (128), skipping")
+        if n > 256:
+            print(f"Warning: N={n} exceeds single-CT limit (256), skipping")
 
-    n_values = [n for n in args.n_values if n <= 128]
+    n_values = [n for n in args.n_values if n <= 256]
     if not n_values:
         print("No valid N values to benchmark.")
         sys.exit(1)

@@ -5,10 +5,9 @@ Benchmark HE ranking with and without tie correction for varying N.
 Runs both modes (basic, tie-corrected) side by side and reports the
 overhead introduced by Algorithm 6 (Mazzone et al., USENIX Security 2025).
 
-Tie correction adds 2 extra levels (sign^2 + mask*E), so the maximum N
-with 15 Q primes (14 levels) is:
-  - Basic:         N <= 128  (compareDepth + 2)
-  - Tie-corrected: N <= 64   (compareDepth + 4)
+Tie correction adds 2 extra levels (sign^2 + mask*E).
+With f,g at n=65536 (depth=24), both basic and tie-corrected
+support N up to 128 (single-ciphertext limit).
 
 Usage:
     python3 benchmark_ranking_tie_correction.py [--n-values N1 N2 ...] [--runs R] [--output FILE]
@@ -148,12 +147,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--binary", type=Path, default=BINARY_DEFAULT,
-        help="Path to 24_ckks_ranking_tie_correction binary"
+        help="Path to 23_ckks_ranking_tie_correction binary"
     )
     parser.add_argument(
         "--n-values", type=int, nargs="+", default=N_VALUES_DEFAULT,
         metavar="N",
-        help="Vector lengths to benchmark (default: 8 16 32 64)"
+        help="Vector lengths to benchmark (default: 8 16 32 64 128)"
     )
     parser.add_argument(
         "--runs", type=int, default=3,
@@ -176,7 +175,7 @@ def main() -> None:
             print(f"Error: N={n} is not a positive power of 2")
             sys.exit(1)
 
-    max_tie_corr = 64
+    max_tie_corr = 128
     n_values = [n for n in args.n_values if n <= 128]
     if not n_values:
         print("No valid N values to benchmark.")
