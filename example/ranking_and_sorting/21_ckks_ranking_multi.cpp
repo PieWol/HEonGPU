@@ -143,9 +143,9 @@ struct CKKSParams {
 static CKKSParams deriveParams(bool tie_correction)
 {
     // fg-composite: dg=3, df=2 → 5 degree-7 evals.
-    // Empirical depth (matches working single-CT implementations):
-    //   basic: 24,  TC: 27 (= 24 + 3 for sign² + mask + maskC0)
-    const int depth = tie_correction ? 27 : 24;
+    // Depth: transpose(1) + fg-sign(20) + maskColumn0(1) = 22 basic
+    //   TC adds: C*(1-C)(1) + mask(1) = +2 → 24 total
+    const int depth = tie_correction ? 24 : 22;
     const int Q_size = depth + 1;
     const int security_bits = 1761;  // n=65536, 128-bit security
     const int max_dnum = 5;
