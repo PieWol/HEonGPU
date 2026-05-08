@@ -9,15 +9,18 @@ Implements ranking, sorting, minimum, and median from:
 Parameter choices differ from the reference OpenFHE implementation:
   - Ranking/TC use f,g sign composition (dg=3, df=2) instead of Chebyshev.
     N<=32: Chebyshev at n=32768.  N>32: f,g at n=65536.
+  - Multi-CT ranking uses f,g at n=65536 with B=128 blocks.
   - Sorting uses paper-exact parameters at n=131072.
   - Minimum/median use Chebyshev at n=131072.
 
-Per-algorithm N caps (single-ciphertext, limited by N²<=slots):
-  - ranking:    N <= 128  (n=65536 for N>32, n=32768 for N<=32)
-  - ranking_tc: N <= 128  (f,g at n=65536)
-  - sorting:    N <= 256  (n=131072)
-  - minimum:    N <= 256  (n=131072)
-  - median:     N <= 256  (n=131072)
+Per-algorithm N ranges:
+  - ranking:          8 <= N <= 128   (single-CT, n=65536 for N>32, n=32768 for N<=32)
+  - ranking_tc:       8 <= N <= 128   (single-CT, f,g at n=65536)
+  - ranking_multi:  256 <= N <= 16384 (multi-CT, B=128, f,g at n=65536)
+  - ranking_multi_tc: 256 <= N <= 16384 (multi-CT, B=128, f,g at n=65536)
+  - sorting:          8 <= N <= 256   (single-CT, n=131072)
+  - minimum:          8 <= N <= 256   (single-CT, n=131072)
+  - median:           8 <= N <= 256   (single-CT, n=131072)
 
 Usage:
     python3 benchmark_all_paper_spec.py [--n-values N1 N2 ...] [--runs R] [--output FILE]
@@ -42,16 +45,18 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _BIN_DIR    = _SCRIPT_DIR.parent / "build/bin/examples/ranking_and_sorting"
 
-# (label, binary name, timing field, extra args, max N)
+# (label, binary name, timing field, extra args, min N, max N)
 BENCHMARKS = [
-    ("ranking",    "23_ckks_ranking_tie_correction",  "rank_ms",   [],                  128),
-    ("ranking_tc", "23_ckks_ranking_tie_correction",  "rank_ms",   ["--tie-correction"], 128),
-    ("sorting",    "22_ckks_sorting_paper",           "sort_ms",   [],                  256),
-    ("minimum",    "19_ckks_minimum",                 "min_ms",    [],                  256),
-    ("median",     "20_ckks_median",                  "median_ms", [],                  256),
+    ("ranking",          "23_ckks_ranking_tie_correction", "rank_ms",   [],                    8,   128),
+    ("ranking_tc",       "23_ckks_ranking_tie_correction", "rank_ms",   ["--tie-correction"],   8,   128),
+    ("ranking_multi",    "21_ckks_ranking_multi",          "rank_ms",   [],                  256, 16384),
+    ("ranking_multi_tc", "21_ckks_ranking_multi",          "rank_ms",   ["--tie-correction"], 256, 16384),
+    ("sorting",          "22_ckks_sorting_paper",          "sort_ms",   [],                    8,   256),
+    ("minimum",          "19_ckks_minimum",                "min_ms",    [],                    8,   256),
+    ("median",           "20_ckks_median",                 "median_ms", [],                    8,   256),
 ]
 
-N_VALUES_DEFAULT = [8, 16, 32, 64, 128, 256]
+N_VALUES_DEFAULT = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
 
 
 def run_once(binary: Path, n: int, extra_args: list[str] = []) -> dict | None:
@@ -59,7 +64,7 @@ def run_once(binary: Path, n: int, extra_args: list[str] = []) -> dict | None:
     try:
         result = subprocess.run(
             [str(binary), str(n), "--bench"] + extra_args,
-            capture_output=True, text=True, timeout=3600
+            capture_output=True, text=True, timeout=7200
         )
     except subprocess.TimeoutExpired:
         print(f"    TIMEOUT", file=sys.stderr)
@@ -144,7 +149,7 @@ def print_comparison_table(results: list[dict]) -> None:
     print(sep)
 
     ref_label = "ranking"
-    ref_field = next(tf for l, _, tf, _, _ in BENCHMARKS if l == ref_label)
+    ref_field = next(tf for l, _, tf, _, _, _ in BENCHMARKS if l == ref_label)
     print(f"\nRelative cost (normalised to {ref_label}):")
     print(f"{'N':>6}  " + "  ".join(f"{l:>{col_w}}" for l in labels))
     print("-" * (8 + (col_w + 2) * len(labels)))
@@ -199,15 +204,15 @@ def main() -> None:
         "--skip", nargs="+", default=[],
         metavar="LABEL",
         choices=[b[0] for b in BENCHMARKS],
-        help="Skip one or more benchmarks (e.g. --skip sorting median)"
+        help="Skip one or more benchmarks (e.g. --skip sorting median ranking_multi)"
     )
     args = parser.parse_args()
 
     binaries: dict[str, Path] = {}
-    active_benchmarks = [(l, b, tf, ea, mn) for l, b, tf, ea, mn in BENCHMARKS
+    active_benchmarks = [(l, b, tf, ea, lo, hi) for l, b, tf, ea, lo, hi in BENCHMARKS
                          if l not in args.skip]
     missing = []
-    for label, binary_name, _, _, _ in active_benchmarks:
+    for label, binary_name, _, _, _, _ in active_benchmarks:
         path = args.bin_dir / binary_name
         binaries[label] = path
         if not path.exists():
@@ -218,11 +223,11 @@ def main() -> None:
             print(f"Binary not found [{label}]: {path}")
         print("\nBuild missing binaries with:")
         for label, path in missing:
-            bin_name = next(b for l, b, _, _, _ in BENCHMARKS if l == label)
+            bin_name = next(b for l, b, _, _, _, _ in BENCHMARKS if l == label)
             print(f"  cmake --build build --target {bin_name}")
         sys.exit(1)
 
-    max_n = max(mn for _, _, _, _, mn in active_benchmarks)
+    max_n = max(hi for _, _, _, _, _, hi in active_benchmarks)
     for n in args.n_values:
         if n <= 0 or (n & (n - 1)) != 0:
             print(f"Error: N={n} is not a positive power of 2")
@@ -233,7 +238,7 @@ def main() -> None:
         print("No valid N values.")
         sys.exit(1)
 
-    active_labels = [l for l, _, _, _, _ in active_benchmarks]
+    active_labels = [l for l, _, _, _, _, _ in active_benchmarks]
     print(f"Algorithms : {', '.join(active_labels)}")
     print(f"N range    : {n_values}")
     print(f"Runs       : {args.runs} per algorithm per N")
@@ -245,9 +250,9 @@ def main() -> None:
         print(f"N = {n}")
         print(f"{'='*60}")
         row = {"n": n}
-        for label, _, timing_field, extra_args, max_n in active_benchmarks:
-            if n > max_n:
-                print(f"    [{label}] skipped (N={n} > max {max_n})")
+        for label, _, timing_field, extra_args, min_n, max_n in active_benchmarks:
+            if n < min_n or n > max_n:
+                print(f"    [{label}] skipped (N={n} outside [{min_n}, {max_n}])")
                 row[f"{label}.{timing_field}"]        = float("nan")
                 row[f"{label}.{timing_field[:-3]}_s"] = float("nan")
                 continue
@@ -262,7 +267,8 @@ def main() -> None:
                 row.update(result)
         all_results.append(row)
 
-        active_for_n = [(l, tf) for l, _, tf, _, mn in active_benchmarks if n <= mn]
+        active_for_n = [(l, tf) for l, _, tf, _, lo, hi in active_benchmarks
+                        if lo <= n <= hi]
         summary = "  Summary: " + "  |  ".join(
             f"{l}={row.get(f'{l}.{tf}', float('nan')):.1f}ms"
             for l, tf in active_for_n
