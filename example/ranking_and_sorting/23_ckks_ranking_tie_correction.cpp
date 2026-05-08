@@ -239,7 +239,7 @@ std::vector<int> transposeGaloisShifts(int vec_len)
 
 int main(int argc, char* argv[])
 {
-    // Usage: 24_ckks_ranking_tie_correction [N] [--tie-correction] [--ties] [--bench]
+    // Usage: 23_ckks_ranking_tie_correction [N] [--tie-correction] [--ties] [--bench]
     int vec_len         = 64;
     bool bench_mode     = false;
     bool tie_correction = false;
