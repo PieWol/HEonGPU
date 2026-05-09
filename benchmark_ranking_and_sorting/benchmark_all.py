@@ -23,16 +23,16 @@ Per-algorithm N ranges:
   - median:           8 <= N <= 256   (single-CT, n=131072)
 
 Usage:
-    python3 benchmark_all_paper_spec.py [--n-values N1 N2 ...] [--runs R] [--output FILE]
+    python3 benchmark_all.py [--n-values N1 N2 ...] [--runs R] [--output FILE]
 
     # Quick test:
-    python3 benchmark_all_paper_spec.py --n-values 8 16 --runs 1
+    python3 benchmark_all.py --n-values 8 16 --runs 1
 
     # Full sweep (default):
-    python3 benchmark_all_paper_spec.py
+    python3 benchmark_all.py
 
     # Custom N set, 5 runs each:
-    python3 benchmark_all_paper_spec.py --n-values 8 16 32 64 128 256 --runs 5
+    python3 benchmark_all.py --n-values 8 16 32 64 128 256 --runs 5
 """
 
 import subprocess

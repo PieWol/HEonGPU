@@ -27,7 +27,9 @@ def safe_float(val):
 
 def main():
     with open(CSV_PATH) as f:
-        rows = list(csv.DictReader(f))
+        reader = csv.DictReader(f, skipinitialspace=True)
+        reader.fieldnames = [n.strip() for n in reader.fieldnames]
+        rows = list(reader)
 
     sc_basic_n, sc_basic_t = [], []
     sc_tc_n, sc_tc_t = [], []
