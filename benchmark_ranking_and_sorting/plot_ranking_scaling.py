@@ -91,14 +91,28 @@ def main():
                 "--", color="#d62728", linewidth=1, zorder=2)
 
     ax.set_xscale("log", base=2)
-    ax.set_yscale("log")
+
+    # Piecewise log y-scale: full log below 1s, compressed log above.
+    # Continuous at y=1; visually appears as a single smooth axis but
+    # devotes more vertical space to the sub-1s region.
+    COMPRESS = 0.4
+    def y_forward(y):
+        y = np.asarray(y, dtype=float)
+        logy = np.log10(np.clip(y, 1e-30, None))
+        return np.where(y >= 1.0, logy * COMPRESS, logy)
+    def y_inverse(t):
+        t = np.asarray(t, dtype=float)
+        return np.where(t >= 0.0, 10.0 ** (t / COMPRESS), 10.0 ** t)
+    ax.set_yscale("function", functions=(y_forward, y_inverse))
+    ax.set_ylim(0.025, 600)
+
     ax.set_xlabel("Input size $N$", fontsize=11)
     ax.set_ylabel("Runtime (s)", fontsize=11)
     ax.set_title("Ranking Runtime Scaling (NVIDIA L40)", fontsize=12)
 
-    # Boundary annotation (placed after data so ylim is known)
+    # Boundary annotation
     boundary_x = math.sqrt(128 * 256)
-    ylo, yhi = ax.get_ylim()
+    ylo, _ = ax.get_ylim()
     label_y = ylo * 1.5
     ax.axvline(boundary_x, color="grey", linestyle="--", linewidth=0.8, zorder=1)
     ax.text(boundary_x * 0.70, label_y, "single-CT", fontsize=8, color="grey",
@@ -112,15 +126,16 @@ def main():
     ax.set_xticklabels([str(n) for n in all_n], fontsize=8, rotation=45)
     ax.xaxis.set_minor_formatter(ticker.NullFormatter())
 
+    # Y-axis: explicit tick set, since custom scales don't auto-pick well
+    yticks = [0.03, 0.05, 0.1, 0.2, 0.5, 1, 3, 10, 30, 100, 300]
+    ax.set_yticks(yticks)
     ax.yaxis.set_major_formatter(ticker.FuncFormatter(
         lambda y, _: f"{y:.0f}" if y >= 1 else f"{y:.2f}" if y >= 0.01 else f"{y:.3f}"
     ))
 
     ax.legend(fontsize=9, loc="upper left")
     ax.grid(True, which="major", linewidth=0.5, alpha=0.5)
-    ax.grid(True, which="minor", linewidth=0.3, alpha=0.3)
 
-    fig.tight_layout()
     fig.savefig(OUT_PATH, bbox_inches="tight")
     print(f"\nSaved to {OUT_PATH}")
 
