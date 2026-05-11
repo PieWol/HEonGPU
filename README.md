@@ -1,3 +1,7 @@
+## Relevant directories with own work
+
+This fork was used to develop and version control the code for my bachelors thesis with the title "Effects of GPU Acceleration of Low Comparison Depth Algorithms for Ranking, Order Statistics and Sorting under CKKS". All the work towards the thesis can be found in [/example/ranking_and_sorting](/example/ranking_and_sorting) aswell as in [/benchmark_ranking_and_sorting](/benchmark_ranking_and_sorting). Apart from this disclaimer the readme remains unchanged.
+
 # 🚀 **HEonGPU** - A GPU Based Homomorphic Encryption Library
 
 HEonGPU is a high-performance library designed to optimize Fully Homomorphic Encryption (FHE) operations on GPUs. By leveraging the parallel processing power of GPUs, it significantly reduces the computational load of FHE through concurrent execution of complex operations. Its multi-stream architecture enables efficient parallel processing and minimizes the overhead of data transfers between the CPU and GPU. These features make HEonGPU ideal for large-scale encrypted computations, offering reduced latency and improved performance.
@@ -9,7 +13,7 @@ The goal of HEonGPU is to provide:
 
 For more information about HEonGPU: 
 - https://eprint.iacr.org/2024/1543
-- https://heongpu.readthedocs.io/
+- https://heongpu.readthedocs.io/ 
 
 ### Current HEonGPU Capabilities and Schemes
 
