@@ -123,7 +123,11 @@ static size_t getPeakGPUMiB() {
 
 // ---------------------------------------------------------------------------
 // Input normalization
+// Currently unused: the benchmark input (OpenFHE reference dataset) is
+// already in [0, 1], so pairwise differences lie in [-1, 1] without
+// rescaling. Retained for use with arbitrary input ranges.
 // ---------------------------------------------------------------------------
+[[maybe_unused]]
 std::vector<double> normalizeToUnit(const std::vector<double>& v)
 {
     double lo = *std::min_element(v.begin(), v.end());
@@ -535,7 +539,6 @@ int main(int argc, char* argv[])
     std::vector<double> input = loadPoints1D(N);
 
     double expected_min = *std::min_element(input.begin(), input.end());
-    std::vector<double> normalized = normalizeToUnit(input);
 
     if (g_verbose)
     {
@@ -544,7 +547,7 @@ int main(int argc, char* argv[])
     }
 
     std::vector<double> slot_buf(slots, 0.0);
-    for (int i = 0; i < N; i++) slot_buf[i] = normalized[i];
+    for (int i = 0; i < N; i++) slot_buf[i] = input[i];
     heongpu::Plaintext<Scheme>  pt(ctx);
     enc.encode(pt, slot_buf, scale);
     heongpu::Ciphertext<Scheme> ct(ctx);

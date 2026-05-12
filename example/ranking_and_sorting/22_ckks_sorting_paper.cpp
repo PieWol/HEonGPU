@@ -140,7 +140,11 @@ static size_t getPeakGPUMiB() {
 
 // ---------------------------------------------------------------------------
 // Input normalization
+// Currently unused: the benchmark input (OpenFHE reference dataset) is
+// already in [0, 1], so pairwise differences lie in [-1, 1] without
+// rescaling. Retained for use with arbitrary input ranges.
 // ---------------------------------------------------------------------------
+[[maybe_unused]]
 std::vector<double> normalizeToUnit(const std::vector<double>& v)
 {
     double lo = *std::min_element(v.begin(), v.end());
@@ -804,17 +808,14 @@ int main(int argc, char* argv[])
     std::vector<double> expected_sorted = input;
     std::sort(expected_sorted.begin(), expected_sorted.end());
 
-    std::vector<double> normalized = normalizeToUnit(input);
-
     if (g_verbose)
     {
         std::cout << "Input:          "; display_vector(input, N);
-        std::cout << "Normalized:     "; display_vector(normalized, N);
         std::cout << "Expected sorted:"; display_vector(expected_sorted, N);
     }
 
     std::vector<double> slot_buf(slots, 0.0);
-    for (int i = 0; i < N; i++) slot_buf[i] = normalized[i];
+    for (int i = 0; i < N; i++) slot_buf[i] = input[i];
 
     heongpu::Plaintext<Scheme>  pt(ctx);
     enc.encode(pt, slot_buf, scale);
@@ -846,12 +847,9 @@ int main(int argc, char* argv[])
     double hi    = *std::max_element(input.begin(), input.end());
     double range = hi - lo;
 
-    std::vector<double> he_sorted(N), he_sorted_orig(N);
+    std::vector<double> he_sorted(N);
     for (int k = 0; k < N; k++)
-    {
-        he_sorted[k]      = raw[k * N];
-        he_sorted_orig[k] = he_sorted[k] * range + lo;
-    }
+        he_sorted[k] = raw[k * N];
 
     // Output
     if (bench_mode)
@@ -868,8 +866,7 @@ int main(int argc, char* argv[])
     else
     {
         std::cout << "\n=== Sorting Results ===\n";
-        std::cout << "HE sorted (normalized):     "; display_vector(he_sorted, N);
-        std::cout << "HE sorted (original scale): "; display_vector(he_sorted_orig, N);
+        std::cout << "HE sorted:      "; display_vector(he_sorted, N);
 
         std::cout << "\nVerification:\n";
         bool monotone    = true;
@@ -877,10 +874,10 @@ int main(int argc, char* argv[])
         for (int k = 0; k < N; k++)
         {
             double expected = expected_sorted[k];
-            double actual   = he_sorted_orig[k];
+            double actual   = he_sorted[k];
             double err      = std::abs(actual - expected);
             bool   correct  = err < (0.5 * range / N + 0.5);
-            if (k > 0 && he_sorted_orig[k] < he_sorted_orig[k-1] - 0.1)
+            if (k > 0 && he_sorted[k] < he_sorted[k-1] - 0.1)
                 monotone = false;
             if (!correct) all_correct = false;
             std::cout << "  sorted[" << k << "]: expected=" << expected
