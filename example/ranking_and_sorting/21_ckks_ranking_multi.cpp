@@ -115,7 +115,11 @@ static std::vector<double> loadPoints1D(int n)
 
 // ---------------------------------------------------------------------------
 // Input normalization
+// Currently unused: the benchmark input (OpenFHE reference dataset) is
+// already in [0, 1], so pairwise differences lie in [-1, 1] without
+// rescaling. Retained for use with arbitrary input ranges.
 // ---------------------------------------------------------------------------
+[[maybe_unused]]
 static std::vector<double> normalizeToUnit(const std::vector<double>& v)
 {
     double lo = *std::min_element(v.begin(), v.end());
@@ -811,7 +815,6 @@ int main(int argc, char* argv[])
 
     // Input
     std::vector<double> input = loadPoints1D(N);
-    std::vector<double> norm = normalizeToUnit(input);
 
     if (g_verbose)
     {
@@ -827,7 +830,7 @@ int main(int argc, char* argv[])
     {
         std::vector<double> buf(slots, 0.0);
         for (int i = 0; i < L; i++)
-            buf[i] = norm[j * L + i];
+            buf[i] = input[j * L + i];
 
         heongpu::Plaintext<Scheme> pt(ctx);
         enc.encode(pt, buf, scale);

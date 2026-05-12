@@ -120,6 +120,10 @@ int selectChebyshevDegree(int N)
     return 2047;
 }
 
+// Currently unused: the benchmark input (OpenFHE reference dataset) is
+// already in [0, 1], so pairwise differences lie in [-1, 1] without
+// rescaling. Retained for use with arbitrary input ranges.
+[[maybe_unused]]
 std::vector<double> normalizeForRanking(const std::vector<double>& input)
 {
     double lo    = *std::min_element(input.begin(), input.end());
@@ -439,19 +443,15 @@ int main(int argc, char* argv[])
     // ===== Input (same CSV as OpenFHE reference) =====
     std::vector<double> input = loadPoints1D(vec_len);
 
-    std::vector<double> normalized_input = normalizeForRanking(input);
-
     if (g_verbose)
     {
         std::cout << "Original input: ";
         display_vector(input, vec_len);
-        std::cout << "Normalized:     ";
-        display_vector(normalized_input, vec_len);
     }
 
     std::vector<double> row_initial(available_slots, 0.0);
     for (int i = 0; i < vec_len; i++)
-        row_initial[i] = normalized_input[i];
+        row_initial[i] = input[i];
 
     heongpu::Plaintext<Scheme> plaintext(context);
     encoder.encode(plaintext, row_initial, scale);
